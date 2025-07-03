@@ -22,9 +22,13 @@ android {
     }
     packagingOptions {
         jniLibs {
-            useLegacyPackaging true
+            useLegacyPackaging false
         }
+        // Fix for 16 KB page size alignment issues
+        doNotStrip '**/*.so'
     }
+    // Enable compression of native libraries for proper alignment
+    ndkVersion "25.1.8937393" // Use the NDK version that's installed on your system
     buildTypes {
         release {
             minifyEnabled false
