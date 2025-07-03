@@ -33,7 +33,8 @@ LOCAL_SRC_FILES := \
 	src/fill.c \
 	src/android_assets.c \
 	src/gifenc.c\
-	src/sounds.c
+	src/sounds.c \
+	src/tuxpaint_egl_sync.c
 
 MY_CFLAGS:= -O0 -g -W -Wall -fno-common -ffloat-store \
 	-Wcast-align -Wredundant-decls \

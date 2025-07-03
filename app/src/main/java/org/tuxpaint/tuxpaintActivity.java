@@ -18,6 +18,13 @@ public class tuxpaintActivity extends SDLActivity {
     private static native boolean managertojni(AssetManager mgr);
     private static native void setnativelibdir(String path);
 
+    // Lock object for OpenGL context synchronization
+    private static final Object sGLLock = new Object();
+    
+    // Native methods for EGL context synchronization to fix EGL_BAD_ACCESS errors
+    private static native void initEGLContextManager();
+    private static native boolean lockEGLContext();
+    private static native boolean unlockEGLContext();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -31,11 +38,45 @@ public class tuxpaintActivity extends SDLActivity {
             }
         }
 
-
-        super.onCreate(savedInstanceState);
-        mgr = getResources().getAssets();
-        managertojni(mgr);
-        setnativelibdir(getApplicationInfo().nativeLibraryDir + "/");
+        synchronized (sGLLock) {
+            super.onCreate(savedInstanceState);
+            mgr = getResources().getAssets();
+            managertojni(mgr);
+            setnativelibdir(getApplicationInfo().nativeLibraryDir + "/");
+        }
+    }
+    
+    // Synchronize OpenGL context access
+    @Override
+    public void onResume() {
+        synchronized (sGLLock) {
+            super.onResume();
+        }
+    }
+    
+    @Override
+    public void onPause() {
+        synchronized (sGLLock) {
+            super.onPause();
+        }
+    }
+    
+    // Important: Add EGL synchronization to the main activity methods
+    // to ensure OpenGL operations are properly synchronized between threads
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        synchronized (sGLLock) {
+            Log.v(TAG, "Synchronized onWindowFocusChanged: " + hasFocus);
+            super.onWindowFocusChanged(hasFocus);
+        }
+    }
+    
+    @Override
+    public void onLowMemory() {
+        synchronized (sGLLock) {
+            Log.v(TAG, "Synchronized onLowMemory");
+            super.onLowMemory();
+        }
     }
 
     static {
@@ -64,5 +105,8 @@ public class tuxpaintActivity extends SDLActivity {
         System.loadLibrary("SDL2_Pango");
 	System.loadLibrary("SDL2_gfx");
         System.loadLibrary("tuxpaint");
+        
+        // Initialize the EGL context manager to prevent EGL_BAD_ACCESS errors
+        initEGLContextManager();
     }
 }
