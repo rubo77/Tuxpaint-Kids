@@ -33,12 +33,10 @@ static EGLBoolean (*real_eglDestroyContext)(EGLDisplay dpy, EGLContext ctx);
 
 // Thread tracking to detect when multiple threads try to use same context
 static pthread_t egl_context_owner = 0;
-static EGLContext current_context = EGL_NO_CONTEXT;
+static void* egl_context = NULL;
 
-// JNI methods to initialize and control the EGL mutex
-
-JNIEXPORT void JNICALL
-Java_org_tuxpaint_tuxpaintActivity_initEGLContextManager(JNIEnv *env, jclass clazz) {
+// Initialize the EGL mutex
+static void init_egl_mutex(void) {
     if (egl_mutex_initialized) {
         LOGI("EGL mutex already initialized");
         return;
@@ -58,51 +56,122 @@ Java_org_tuxpaint_tuxpaintActivity_initEGLContextManager(JNIEnv *env, jclass cla
     }
 }
 
-JNIEXPORT jboolean JNICALL
+// JNI methods to initialize and control the EGL mutex
+
+JNIEXPORT void JNICALL
+Java_org_tuxpaint_tuxpaintActivity_initEGLMutex(JNIEnv *env, jclass clazz) {
+    init_egl_mutex();
+}
+
+JNIEXPORT void JNICALL
 Java_org_tuxpaint_tuxpaintActivity_lockEGLContext(JNIEnv *env, jclass clazz) {
     if (!egl_mutex_initialized) {
         LOGE("Attempting to lock uninitialized EGL mutex");
-        return JNI_FALSE;
+        return;
     }
     
     int result = pthread_mutex_lock(&egl_mutex);
     if (result == 0) {
         LOGI("EGL mutex locked");
-        return JNI_TRUE;
+        return;
     } else {
         LOGE("Failed to lock EGL mutex, error code: %d", result);
-        return JNI_FALSE;
+        return;
     }
 }
 
-JNIEXPORT jboolean JNICALL
+JNIEXPORT void JNICALL
 Java_org_tuxpaint_tuxpaintActivity_unlockEGLContext(JNIEnv *env, jclass clazz) {
     if (!egl_mutex_initialized) {
         LOGE("Attempting to unlock uninitialized EGL mutex");
-        return JNI_FALSE;
+        return;
     }
     
     int result = pthread_mutex_unlock(&egl_mutex);
     if (result == 0) {
         LOGI("EGL mutex unlocked");
-        return JNI_TRUE;
+        return;
     } else {
         LOGE("Failed to unlock EGL mutex, error code: %d", result);
-        return JNI_FALSE;
+        return;
     }
 }
 
-// Functions to be called from the SDL native code
-void tuxpaint_egl_lock(void) {
-    if (egl_mutex_initialized) {
-        pthread_mutex_lock(&egl_mutex);
+// Track which thread is using the EGL context
+JNIEXPORT void JNICALL
+Java_org_tuxpaint_tuxpaintActivity_trackEGLContext(JNIEnv *env, jclass clazz, jlong contextPtr) {
+    void* context = (void*)contextPtr;
+    pthread_t current_thread = pthread_self();
+    
+    if (context) {
+        LOGI("EGL context %p is now owned by thread %lu", context, (unsigned long)current_thread);
+        
+        // If a different thread already owns this context, log a warning
+        if (egl_context_owner != 0 && !pthread_equal(current_thread, egl_context_owner)) {
+            LOGE("EGL CONTEXT VIOLATION: Thread %lu trying to use context %p previously owned by thread %lu", 
+                (unsigned long)current_thread, context, (unsigned long)egl_context_owner);
+        }
+        
+        // Update the context owner
+        egl_context = context;
+        egl_context_owner = current_thread;
+    } else {
+        // Clear ownership if no context
+        egl_context = NULL;
+        egl_context_owner = 0;
+        LOGI("EGL context ownership cleared");
     }
+}
+
+// Utility functions to be called from C code
+void tuxpaint_egl_lock(void) {
+    if (!egl_mutex_initialized) {
+        init_egl_mutex();
+    }
+    
+    pthread_mutex_lock(&egl_mutex);
 }
 
 void tuxpaint_egl_unlock(void) {
-    if (egl_mutex_initialized) {
-        pthread_mutex_unlock(&egl_mutex);
+    pthread_mutex_unlock(&egl_mutex);
+}
+
+void tuxpaint_check_egl_context(void* ctx) {
+    if (ctx != NULL) {
+        pthread_t current_thread = pthread_self();
+        
+        // Check if a different thread is trying to use our context
+        if (ctx == egl_context && egl_context_owner != 0 && 
+            !pthread_equal(current_thread, egl_context_owner)) {
+            // Log a warning about potential EGL_BAD_ACCESS error
+            __android_log_print(ANDROID_LOG_ERROR, "Tux-EGL-Sync", 
+                              "EGL CONTEXT VIOLATION: Thread %lu trying to use context %p owned by thread %lu", 
+                              (unsigned long)current_thread, ctx, (unsigned long)egl_context_owner);
+        }
+        
+        // Update the context owner
+        egl_context = ctx;
+        egl_context_owner = current_thread;
+        __android_log_print(ANDROID_LOG_INFO, "Tux-EGL-Sync", 
+                         "EGL context %p is now owned by thread %lu", ctx, (unsigned long)current_thread);
+    } else {
+        // Clear the owner if no context
+        egl_context = NULL;
+        egl_context_owner = 0;
     }
+}
+
+void tuxpaint_release_egl_context(void* ctx) {
+    tuxpaint_egl_lock();
+    
+    // Only clear context ownership if this is our current context
+    if (ctx == egl_context) {
+        egl_context = NULL;
+        egl_context_owner = 0;
+        __android_log_print(ANDROID_LOG_INFO, "Tux-EGL-Sync", "EGL context ownership cleared");
+    }
+    
+    tuxpaint_egl_unlock();
 }
 
 // Wrapper functions that intercept EGL calls
@@ -121,30 +190,15 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLC
     // Lock before changing context
     tuxpaint_egl_lock();
     
-    // Track which thread is using this context
-    if (ctx != EGL_NO_CONTEXT) {
-        pthread_t current_thread = pthread_self();
-        
-        // If this is a different thread trying to use an already-owned context
-        if (ctx == current_context && egl_context_owner != 0 && 
-            !pthread_equal(current_thread, egl_context_owner)) {
-            LOGE("EGL CONTEXT VIOLATION: Thread %lu trying to use context %p owned by thread %lu", 
-                (unsigned long)current_thread, ctx, (unsigned long)egl_context_owner);
-            // We still try to make it work by updating the owner
-        }
-        
-        // Update context owner
-        current_context = ctx;
-        egl_context_owner = current_thread;
-    }
+    // Check if another thread is trying to use context
+    tuxpaint_check_egl_context(ctx);
     
     // Call the real function
     result = real_eglMakeCurrent(dpy, draw, read, ctx);
     
     // If we're releasing the context, clear the owner
     if (ctx == EGL_NO_CONTEXT) {
-        current_context = EGL_NO_CONTEXT;
-        egl_context_owner = 0;
+        tuxpaint_release_egl_context(ctx);
     }
     
     // Unlock
@@ -213,11 +267,8 @@ EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx) {
     // Lock before destroying context
     tuxpaint_egl_lock();
     
-    // If this is the current context, clear the owner
-    if (ctx == current_context) {
-        current_context = EGL_NO_CONTEXT;
-        egl_context_owner = 0;
-    }
+    // Release the context
+    tuxpaint_release_egl_context(ctx);
     
     // Call the real function
     result = real_eglDestroyContext(dpy, ctx);

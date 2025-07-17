@@ -21,14 +21,20 @@ public class tuxpaintActivity extends SDLActivity {
     // Lock object for OpenGL context synchronization
     private static final Object sGLLock = new Object();
     
-    // Native methods for EGL context synchronization to fix EGL_BAD_ACCESS errors
-    private static native void initEGLContextManager();
-    private static native boolean lockEGLContext();
-    private static native boolean unlockEGLContext();
+    // Native methods for SDL EGL patch to fix EGL_BAD_ACCESS errors
+    private static native void initSDLEGLPatch();
+    private static native boolean isSDLEGLPatchInitialized();
+    private static native void logCurrentThread(String tag);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         Log.v(TAG, "onCreate()");
+
+        // Initialize SDL EGL patch early to prevent EGL_BAD_ACCESS errors
+        initSDLEGLContextManager();
+        
+        // Log the current thread ID for debugging
+        logCurrentThread("onCreate");
 
         boolean requestPermissions = false;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && Build.VERSION.SDK_INT <= Build.VERSION_CODES.R) {
@@ -49,6 +55,10 @@ public class tuxpaintActivity extends SDLActivity {
     // Synchronize OpenGL context access
     @Override
     public void onResume() {
+        // Using Thread.currentThread().getName() instead of deprecated getId()
+        Log.v(TAG, "onResume() - current thread: " + Thread.currentThread().getName());
+        logCurrentThread("onResume");
+        
         synchronized (sGLLock) {
             super.onResume();
         }
@@ -56,6 +66,10 @@ public class tuxpaintActivity extends SDLActivity {
     
     @Override
     public void onPause() {
+        // Using Thread.currentThread().getName() instead of deprecated getId()
+        Log.v(TAG, "onPause() - current thread: " + Thread.currentThread().getName());
+        logCurrentThread("onPause");
+        
         synchronized (sGLLock) {
             super.onPause();
         }
@@ -78,15 +92,75 @@ public class tuxpaintActivity extends SDLActivity {
             super.onLowMemory();
         }
     }
+    
+    /**
+     * Initializes the SDL EGL patch to prevent EGL_BAD_ACCESS errors
+     * This method sets up native code to synchronize EGL context access
+     */
+    private static void initSDLEGLContextManager() {
+        Log.i(TAG, "Initializing SDL EGL Context Manager");
+        // Initialize the patch in the native code
+        initSDLEGLPatch();
+        Log.i(TAG, "SDL EGL Patch initialized: " + isSDLEGLPatchInitialized());
+    }
 
     static {
-        System.loadLibrary("c++_shared");
-        System.loadLibrary("tuxpaint_png");
-        System.loadLibrary("tuxpaint_fribidi");
-        System.loadLibrary("SDL2");
-        System.loadLibrary("tp_android_assets_fopen");
-        System.loadLibrary("tuxpaint_intl");
-        System.loadLibrary("tuxpaint_iconv");
+        try {
+            System.loadLibrary("c++_shared");
+            Log.i(TAG, "Loaded c++_shared");
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "Failed to load c++_shared: " + e.getMessage());
+        }
+        
+        try {
+            System.loadLibrary("tuxpaint_png");
+            Log.i(TAG, "Loaded tuxpaint_png");
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "Failed to load tuxpaint_png: " + e.getMessage());
+        }
+        
+        try {
+            System.loadLibrary("tuxpaint_fribidi");
+            Log.i(TAG, "Loaded tuxpaint_fribidi");
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "Failed to load tuxpaint_fribidi: " + e.getMessage());
+        }
+        
+        try {
+            System.loadLibrary("SDL2");
+            Log.i(TAG, "Loaded SDL2");
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "Failed to load SDL2: " + e.getMessage());
+        }
+        
+        try {
+            System.loadLibrary("tp_android_assets_fopen");
+            Log.i(TAG, "Loaded tp_android_assets_fopen");
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "Failed to load tp_android_assets_fopen: " + e.getMessage());
+        }
+        
+        try {
+            System.loadLibrary("tuxpaint_intl");
+            Log.i(TAG, "Loaded tuxpaint_intl");
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "Failed to load tuxpaint_intl: " + e.getMessage());
+        }
+        
+        try {
+            System.loadLibrary("tuxpaint_iconv");
+            Log.i(TAG, "Loaded tuxpaint_iconv");
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "Failed to load tuxpaint_iconv: " + e.getMessage());
+        }
+        
+        // Load our SDL EGL patch native library
+        try {
+            System.loadLibrary("sdl_egl_patch");
+            Log.i(TAG, "Loaded sdl_egl_patch");
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "Failed to load sdl_egl_patch: " + e.getMessage());
+        }
         System.loadLibrary("tuxpaint_pixman");
         System.loadLibrary("tuxpaint_xml2");
         System.loadLibrary("tuxpaint_freetype");
@@ -107,6 +181,6 @@ public class tuxpaintActivity extends SDLActivity {
         System.loadLibrary("tuxpaint");
         
         // Initialize the EGL context manager to prevent EGL_BAD_ACCESS errors
-        initEGLContextManager();
+        initSDLEGLContextManager();
     }
 }
