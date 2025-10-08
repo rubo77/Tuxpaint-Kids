@@ -27,6 +27,13 @@
 
 #include "platform.h"
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#ifdef ENABLE_MULTITOUCH
+#include "android_multitouch.h"
+#endif
+#endif
+
 /* (Note: VER_VERSION and VER_DATE are now handled by Makefile) */
 
 
@@ -358,6 +365,7 @@ extern status_t haiku_trash(const char *f);
 #define AUTOSAVE_GOING_BACKGROUND
 #include "android_print.h"
 #include "android_assets.h"
+#include "SDL_mouse_c.h"
 int entered_background = 0;
 
 #else
@@ -797,6 +805,8 @@ static SDL_Rect r_ttools;       /* was 96x40 @ 0,0  (title for tools, "Tools") *
 static SDL_Rect r_tcolors;      /* was 96x48 @ 0,376 (title for colors, "Colors") */
 static SDL_Rect r_ttoolopt;     /* was 96x40 @ 544,0 (title for tool options) */
 static SDL_Rect r_tuxarea;      /* was 640x56 */
+static SDL_Rect r_sound_btn;    /* Sound toggle button (bottom left) */
+static SDL_Rect r_childmode_btn; /* Child mode toggle button (bottom left) */
 static SDL_Rect r_label;
 static SDL_Rect old_dest;
 static SDL_Rect r_tir;          /* Text input rectangle */
@@ -808,6 +818,13 @@ static int button_size_auto = 0;        /* if the size of buttons should be auto
 static float button_scale;      /* scale factor to be applied to the size of buttons */
 static int color_button_w;      /* was 32 */
 static int color_button_h;      /* was 48 */
+static int child_mode = 0;      /* Child mode toggle (simplified UI) */
+static int slider_dragging = 0; /* True when user is dragging the child mode brush slider */
+static float slider_current_pos = 0.0; /* Current animated slider position (0.0-1.0 percentage) */
+static float slider_start_pos = 0.0;   /* Animation start position (0.0-1.0 percentage) */
+static float slider_target_pos = 0.0;  /* Target slider position (0.0-1.0 percentage) */
+static Uint32 slider_anim_start_time = 0; /* Animation start time in milliseconds */
+static int slider_anim_duration = 500; /* Animation duration in milliseconds (0.5s default for drag) */
 static int colors_rows;
 
 static int buttons_tall;        /* promoted to a global variable from setup_normal_screen_layout() */
@@ -873,6 +890,9 @@ static void set_max_buttonscale(void)
  */
 static void setup_normal_screen_layout(void)
 {
+#ifdef __ANDROID__
+  __android_log_print(ANDROID_LOG_INFO, "TuxPaint", "setup_normal_screen_layout() called, child_mode=%d", child_mode);
+#endif
   button_w = 48 * button_scale;
   button_h = 48 * button_scale;
 
@@ -882,7 +902,7 @@ static void setup_normal_screen_layout(void)
   r_ttools.x = 0;
   r_ttools.y = 0;
   r_ttools.w = gd_tools.cols * button_w;
-  r_ttools.h = 40 * button_scale;
+  r_ttools.h = 40 * button_scale;  /* position of row 0 in the tools column and the first element below the Label on the right from top */
 
   r_ttoolopt.w = gd_toolopt.cols * button_w;
   r_ttoolopt.h = 40 * button_scale;
@@ -896,10 +916,11 @@ static void setup_normal_screen_layout(void)
   color_button_h = r_colors.h / gd_colors.rows;
   r_tcolors.h = r_colors.h;
 
+  /* Hide "Colors" label - stretch color buttons to full width */
   r_tcolors.x = 0;
-  r_tcolors.w = gd_tools.cols * button_w;
-  r_colors.x = r_tcolors.w;
-  r_colors.w = WINDOW_WIDTH - r_tcolors.w;
+  r_tcolors.w = 0;  /* No space for label */
+  r_colors.x = 0;   /* Start at left edge */
+  r_colors.w = WINDOW_WIDTH;  /* Full width */
 
   color_button_w = r_colors.w / gd_colors.cols;
 
@@ -944,8 +965,27 @@ static void setup_normal_screen_layout(void)
   r_colors.y = r_canvas.h + r_canvas.y;
   r_tcolors.y = r_canvas.h + r_canvas.y;
 
-  r_tuxarea.y = r_colors.y + r_colors.h;
-  r_tuxarea.h = WINDOW_HEIGHT - r_tuxarea.y;
+  /* Child mode: Hide Tux area and extend colors to bottom */
+  if (child_mode)
+  {
+    r_tuxarea.y = WINDOW_HEIGHT;  /* Off-screen */
+    r_tuxarea.h = 0;              /* No height */
+    
+    /* Extend colors to fill entire available space - STRETCH buttons like width in 5a8e0829 */
+    r_colors.h = WINDOW_HEIGHT - r_colors.y;  /* Full height to bottom */
+    
+    /* Stretch color buttons vertically to fill space (same as width: color_button_w = r_colors.w / gd_colors.cols) */
+    color_button_h = r_colors.h / gd_colors.rows;
+  }
+  else
+  {
+    /* Reset to normal color area height */
+    r_colors.h = 48 * button_scale * gd_colors.rows;
+    color_button_h = r_colors.h / gd_colors.rows;
+    
+    r_tuxarea.y = r_colors.y + r_colors.h;
+    r_tuxarea.h = WINDOW_HEIGHT - r_tuxarea.y;
+  }
 
   r_sfx.x = r_tuxarea.x;
   r_sfx.y = r_tuxarea.y;
@@ -959,6 +999,17 @@ static void setup_normal_screen_layout(void)
   r_tools.y = r_ttools.h + r_ttools.y;
   r_tools.w = gd_tools.cols * button_w;
   r_tools.h = gd_tools.rows * button_h;
+
+  /* Sound & Child mode buttons in r_ttools header area (Row -1, above tool buttons) */
+  r_sound_btn.w = button_w;
+  r_sound_btn.h = button_h;         /* not used any more */
+  r_sound_btn.x = r_ttools.x;           /* Column 0 (left) */
+  r_sound_btn.y = r_ttools.y;           /* In r_ttools header area */
+  
+  r_childmode_btn.w = button_w;
+  r_childmode_btn.h = button_h;             /* not used any more */
+  r_childmode_btn.x = r_ttools.x + button_w;    /* Column 1 (right) */
+  r_childmode_btn.y = r_ttools.y;               /* In r_ttools header area */
 
   r_toolopt.w = gd_toolopt.cols * button_w;
   r_toolopt.h = gd_toolopt.rows * button_h;
@@ -1398,6 +1449,22 @@ static int no_button_distinction;
 static int button_down;
 static int scrolling_selector, scrolling_tool, scrolling_dialog;
 
+#ifdef ENABLE_MULTITOUCH
+#define MAX_FINGERS 10
+
+typedef struct {
+  int active;
+  long pointer_id;  /* Android pointer ID or SDL finger ID */
+  int x;
+  int y;
+  int last_x;
+  int last_y;
+} FingerState;
+
+static FingerState active_fingers[MAX_FINGERS];
+static int num_active_fingers = 0;
+#endif
+
 static int promptless_save = SAVE_OVER_UNSET;
 static int _promptless_save_over, _promptless_save_over_ask, _promptless_save_over_new;
 static int disable_quit;
@@ -1698,6 +1765,9 @@ static int color_mixer_reset;
 static SDL_Surface *img_title_on, *img_title_off, *img_title_large_on, *img_title_large_off;
 static SDL_Surface *img_title_names[NUM_TITLES];
 static SDL_Surface *img_tools[NUM_TOOLS], *img_tool_names[NUM_TOOLS];
+static SDL_Surface *img_kids_icon, *img_expert_icon;
+static SDL_Surface *img_kids_label, *img_expert_label;
+static SDL_Surface *img_sound_icon;
 
 static SDL_Surface *img_oskdel, *img_osktab, *img_oskenter, *img_oskcapslock, *img_oskshift, *img_oskpaste;
 static SDL_Surface *thumbnail(SDL_Surface * src, int max_x, int max_y, int keep_aspect);
@@ -2072,6 +2142,9 @@ SDL_Joystick *joystick;
 
 static void mainloop(void);
 static void brush_draw(int x1, int y1, int x2, int y2, int update);
+#if defined(__ANDROID__) && defined(ENABLE_MULTITOUCH)
+static void android_multitouch_paint_now(void);
+#endif
 static void blit_brush(int x, int y, int direction, double rotation, int *w, int *h);
 static void stamp_draw(int x, int y, int stamp_angle_rotation);
 static void rec_undo_buffer(void);
@@ -2090,7 +2163,10 @@ static void seticon(void);
 static SDL_Surface *loadimage(const char *const fname);
 static SDL_Surface *do_loadimage(const char *const fname, int abort_on_error);
 static void draw_toolbar(void);
+static void draw_row_minus_1_buttons(void);
 static void draw_magic(void);
+static void draw_child_mode_brush_slider(void);
+static void update_slider_animation(void);
 static void draw_brushes(void);
 static void draw_brushes_spacing(void);
 static void draw_stamps(void);
@@ -2135,6 +2211,8 @@ static void do_eraser(int x, int y, int update);
 static void eraser_draw(int x1, int y1, int x2, int y2);
 static void disable_avail_tools(void);
 static void enable_avail_tools(void);
+static void apply_child_mode_tool_filter(void);
+static void remove_child_mode_tool_filter(void);
 static void reset_avail_tools(void);
 static int compare_dirent2s(struct dirent2 *f1, struct dirent2 *f2);
 static int compare_dirent2s_invert(struct dirent2 *f1, struct dirent2 *f2);
@@ -2312,6 +2390,12 @@ static int magic_button_down(void);
 static SDL_Surface *magic_scale(SDL_Surface * surf, int w, int h, int aspect);
 static SDL_Surface *magic_rotate_scale(SDL_Surface * surf, int r, int w);
 static void reset_touched(void);
+
+#ifdef ENABLE_MULTITOUCH
+static int find_finger_slot(SDL_FingerID finger_id);
+static int allocate_finger_slot(SDL_FingerID finger_id);
+static void release_finger_slot(int slot);
+#endif
 static Uint8 magic_touched(int x, int y);
 static void magic_retract_undo(void);
 
@@ -2385,6 +2469,14 @@ static void do_wait(int counter)
   int i;
   SDL_Surface *back_surf;
   SDL_Rect r;
+#endif
+
+#ifdef __ANDROID__
+  /* On Android, skip splash screen wait because:
+   * 1. Android provides its own splash screen
+   * 2. Touch events are not properly recognized
+   * 3. Users expect apps to start immediately after loading */
+  return;
 #endif
 
   if (bypass_splash_wait)
@@ -2655,6 +2747,17 @@ static void mainloop(void)
   shape_tool_mode = SHAPE_TOOL_MODE_DONE;
   stamp_tool_mode = STAMP_TOOL_MODE_PLACE;
   button_down = 0;
+
+#ifdef ENABLE_MULTITOUCH
+  /* Initialize multitouch tracking */
+  for (int i = 0; i < MAX_FINGERS; i++) {
+    active_fingers[i].active = 0;
+  }
+  num_active_fingers = 0;
+#ifdef __ANDROID__
+  android_multitouch_init();
+#endif
+#endif
   last_cursor_blink = cur_toggle_count = 0;
   texttool_len = 0;
   scrolling_selector = 0;
@@ -3619,7 +3722,109 @@ static void mainloop(void)
       else if ((event.type == SDL_MOUSEBUTTONDOWN ||
                 event.type == TP_SDL_MOUSEBUTTONSCROLL) && event.button.button <= 3)
       {
-        if (HIT(r_tools))
+        /* IMPORTANT: Check sound & childmode buttons FIRST, before r_tools! 
+           These buttons are inside r_tools rect but need separate handling */
+        if (HIT(r_sound_btn) && valid_click(event.button.button))
+        {
+          /* Sound toggle button clicked */
+#ifndef NOSOUND
+          mute = !mute;
+          Mix_HaltChannel(-1);
+
+          /* Redraw the button with new state */
+          draw_row_minus_1_buttons();
+          update_screen_rect(&r_sound_btn);
+
+          if (mute)
+          {
+            draw_tux_text(TUX_BORED, gettext("Sound muted."), 0);
+          }
+          else
+          {
+            draw_tux_text(TUX_BORED, gettext("Sound unmuted."), 0);
+          }
+
+          playsound(screen, 1, SND_CLICK, 1, SNDPOS_LEFT, SNDDIST_NEAR);
+#endif
+        }
+        else if (HIT(r_childmode_btn) && valid_click(event.button.button))
+        {
+          /* Child mode toggle button clicked */
+          child_mode = !child_mode;
+          
+          /* Apply or remove tool restrictions */
+          if (child_mode)
+          {
+            /* Entering child mode */
+            apply_child_mode_tool_filter();
+            
+            /* Switch to paint tool with thick brush if current tool is disabled */
+            if (!tool_avail[cur_tool] || cur_tool != TOOL_BRUSH)
+            {
+              cur_tool = TOOL_BRUSH;
+            }
+            cur_brush = 3;  /* Select aa_round_24.png (24px brush - good size for kids) */
+            brush_scroll = 0;  /* Ensure we scroll to top so brush is visible */
+            
+            /* Initialize slider animation state */
+            int child_brush_min = 0;
+            int child_brush_max = 4;
+            float initial_pos = (float)(cur_brush - child_brush_min) / (float)(child_brush_max - child_brush_min);
+            slider_current_pos = initial_pos;
+            slider_target_pos = initial_pos;
+            slider_anim_start_time = 0;
+            slider_anim_duration = 0;  /* No animation on initial load */
+            
+            render_brush();
+          }
+          else
+          {
+            /* Leaving child mode */
+            remove_child_mode_tool_filter();
+            
+            /* Auto-select Paint tool when exiting child mode */
+            cur_tool = TOOL_BRUSH;
+            SDL_Log("Child mode exit: Auto-selected Paint tool");
+          }
+          
+          /* Redraw button with new state */
+          draw_row_minus_1_buttons();
+          update_screen_rect(&r_childmode_btn);
+          
+          /* Re-layout screen with new mode */
+          setup_screen_layout();
+          
+          /* Redraw entire screen */
+          draw_toolbar();
+          update_screen_rect(&r_tools);  /* Update left toolbar display */
+          draw_colors(COLORSEL_FORCE_REDRAW);
+          
+          /* Clear right panel before drawing brushes/slider */
+          SDL_Rect clear_rect;
+          clear_rect.x = WINDOW_WIDTH - r_ttoolopt.w;
+          clear_rect.y = 0;
+          clear_rect.w = r_ttoolopt.w;
+          clear_rect.h = r_colors.y;
+          SDL_FillRect(screen, &clear_rect, SDL_MapRGB(screen->format, 221, 221, 221));
+          SDL_Log("Child mode toggle: Cleared right panel before redraw");
+          
+          /* Draw brushes if in brush tool */
+          if (cur_tool == TOOL_BRUSH || cur_tool == TOOL_LINES)
+          {
+            draw_brushes();
+          }
+          
+          /* Flip screen immediately to prevent old buffer from being restored */
+          SDL_Flip(screen);
+          SDL_Log("Child mode toggle: Screen flipped");
+          
+          draw_tux_text(child_mode ? TUX_GREAT : TUX_DEFAULT, 
+                       child_mode ? gettext("Child mode activated!") : gettext("Child mode deactivated."), 
+                       0);
+          
+          playsound(screen, 1, SND_CLICK, 1, SNDPOS_LEFT, SNDDIST_NEAR);
+        }
+        else if (HIT(r_tools))
         {
           if (HIT(real_r_tools))
           {
@@ -4123,14 +4328,75 @@ static void mainloop(void)
 
         else if (HIT(r_toolopt) && valid_click(event.button.button))
         {
+          /* In child mode with brush tool, handle slider clicks and dragging */
+          if (child_mode && (cur_tool == TOOL_BRUSH || cur_tool == TOOL_LINES))
+          {
+            /* Calculate slider position - MUST match draw_child_mode_brush_slider() */
+            int slider_x, slider_y, slider_w, slider_h;
+            int click_y;
+            float click_percentage;
+            int child_brush_min = 0;  /* Brush index 0 */
+            int child_brush_max = 4;  /* Brush index 4 */
+            
+            slider_w = button_w - 20;
+            /* Use r_colors.y instead of (WINDOW_HEIGHT - r_colors.h) because in child mode
+               r_colors extends to bottom, so WINDOW_HEIGHT - r_colors.h would be tiny/negative */
+            /* Compress by 5% to avoid overlapping neighboring elements */
+            slider_h = (int)((r_colors.y - r_ttoolopt.h - 40) * 0.95);
+            slider_x = WINDOW_WIDTH - r_ttoolopt.w + (r_ttoolopt.w - slider_w) / 2;
+            slider_y = r_ttoolopt.h + 30;  /* Add extra margin at top */
+            
+            click_y = event.button.y;
+            
+            SDL_Log("SLIDER CLICK: click_y=%d, slider_y=%d, slider_h=%d, range=[%d,%d]",
+                    click_y, slider_y, slider_h, slider_y, slider_y + slider_h);
+            
+            /* Check if click is within slider area */
+            if (click_y >= slider_y && click_y <= slider_y + slider_h)
+            {
+              /* Start slider dragging mode */
+              slider_dragging = 1;
+              
+              /* Calculate position and brush based on click position */
+              /* Map slider position to brush range 0-4 */
+              click_percentage = (float)(click_y - slider_y) / (float)slider_h;
+              
+              /* Set position instantly (no animation on initial click) */
+              slider_current_pos = click_percentage;
+              slider_target_pos = click_percentage;
+              slider_anim_duration = 0;  /* No animation - instant response */
+              
+              /* Calculate target brush for the click position */
+              cur_brush = child_brush_min + (int)((click_percentage * (child_brush_max - child_brush_min + 1)));
+              
+              /* Clamp to valid range 0-4 */
+              if (cur_brush < child_brush_min) cur_brush = child_brush_min;
+              if (cur_brush > child_brush_max) cur_brush = child_brush_max;
+              
+              SDL_Log("SLIDER CLICK: percentage=%.2f, brush=%d, instant position update", 
+                      click_percentage, cur_brush);
+              
+              /* Update brush */
+              render_brush();
+              draw_child_mode_brush_slider();
+              SDL_Flip(screen);  /* Flip immediately to show new position */
+              
+              playsound(screen, 1, SND_CLICK, 1, SNDPOS_RIGHT, SNDDIST_NEAR);
+            }
+            else
+            {
+              SDL_Log("SLIDER: Click outside slider area, ignoring");
+            }
+            /* In child mode, don't process grid-based brush selection - skip the else if below */
+          }
           /* Options on the right
              WARNING: this must be kept in sync with the mouse-move
              code (for cursor changes) and mouse-scroll code. */
 
-          if (cur_tool == TOOL_BRUSH || cur_tool == TOOL_STAMP ||
+          else if (!child_mode && (cur_tool == TOOL_BRUSH || cur_tool == TOOL_STAMP ||
               cur_tool == TOOL_SHAPES || cur_tool == TOOL_LINES ||
               cur_tool == TOOL_MAGIC || cur_tool == TOOL_TEXT ||
-              cur_tool == TOOL_ERASER || cur_tool == TOOL_LABEL || cur_tool == TOOL_FILL)
+              cur_tool == TOOL_ERASER || cur_tool == TOOL_LABEL || cur_tool == TOOL_FILL))
           {
             int num_rows_needed;
             SDL_Rect r_controls;
@@ -5096,7 +5362,8 @@ static void mainloop(void)
                 {
                   Mix_ChannelFinished(NULL);    /* Prevents multiple clicks from toggling between SFX and desc sound, rather than always playing SFX first, then desc sound... */
 
-                  Mix_PlayChannel(2, stamp_data[stamp_group][cur_thing]->ssnd, 0);
+                  if (!mute)
+                    Mix_PlayChannel(2, stamp_data[stamp_group][cur_thing]->ssnd, 0);
 
                   /* If there's a description sound, play it after the SFX! */
 
@@ -5111,7 +5378,8 @@ static void mainloop(void)
 
                   if (stamp_data[stamp_group][cur_thing]->sdesc != NULL)
                   {
-                    Mix_PlayChannel(2, stamp_data[stamp_group][cur_thing]->sdesc, 0);
+                    if (!mute)
+                      Mix_PlayChannel(2, stamp_data[stamp_group][cur_thing]->sdesc, 0);
                   }
                 }
               }
@@ -5333,27 +5601,14 @@ static void mainloop(void)
         {
           const Uint8 *kbd_state;
 
-          motion_since_click = 0;
-
           kbd_state = SDL_GetKeyboardState(NULL);
 
-          if ((kbd_state[SDL_SCANCODE_LCTRL] || kbd_state[SDL_SCANCODE_RCTRL]) && colors_are_selectable)
+          /* Render any live text label */
+          if (cur_tool == TOOL_LABEL && texttool_len > 0 && label_node_to_edit)
           {
-            int chose_color;
-
-            /* Holding [Ctrl] while clicking; switch to temp-mode color selector! */
-            chose_color = do_color_sel(1);
-
-            draw_cur_tool_tip();
-
-            if (chose_color)
-            {
-              playsound(screen, 1, SND_BUBBLE, 1, SNDPOS_CENTER, SNDDIST_NEAR);
-              cur_color = COLOR_SELECTOR;
-              handle_color_changed();
-            }
-            else
-              playsound(screen, 1, SND_CLICK, 1, SNDPOS_CENTER, SNDDIST_NEAR);
+            rec_undo_buffer();
+            do_render_cur_text(1);
+            texttool_len = 0;
 
             draw_colors(COLORSEL_FORCE_REDRAW);
 
@@ -5426,6 +5681,14 @@ static void mainloop(void)
 
               /* brush_draw(old_x, old_y, old_x, old_y, 1); fixes SF #1934883? */
               playsound(screen, 0, paintsound(img_cur_brush_w), 1, event.button.x, SNDDIST_NEAR);
+
+#ifdef __ANDROID__
+              /* Mark this as a new stroke - update old_x/old_y to current position */
+              old_x = event.button.x - r_canvas.x;
+              old_y = event.button.y - r_canvas.y;
+              __android_log_print(ANDROID_LOG_DEBUG, "TuxPaint", 
+                "BRUSH DOWN: new stroke at (%d,%d)", old_x, old_y);
+#endif
 
               if (mouseaccessibility)
                 emulate_button_pressed = !emulate_button_pressed;
@@ -5811,12 +6074,14 @@ static void mainloop(void)
               /* Re-play sound effect: */
 
               Mix_ChannelFinished(NULL);
-              Mix_PlayChannel(2, stamp_data[stamp_group][cur_thing]->ssnd, 0);
+              if (!mute)
+                Mix_PlayChannel(2, stamp_data[stamp_group][cur_thing]->ssnd, 0);
             }
             else if (which == 1 && !stamp_data[stamp_group][cur_stamp[stamp_group]]->no_descsound)
             {
               Mix_ChannelFinished(NULL);
-              Mix_PlayChannel(2, stamp_data[stamp_group][cur_thing]->sdesc, 0);
+              if (!mute)
+                Mix_PlayChannel(2, stamp_data[stamp_group][cur_thing]->sdesc, 0);
             }
 
             magic_switchout(canvas);
@@ -6111,6 +6376,28 @@ static void mainloop(void)
       }
       else if (event.type == SDL_MOUSEBUTTONUP)
       {
+        /* Stop slider dragging in child mode and snap to final position */
+        if (slider_dragging)
+        {
+          slider_dragging = 0;
+          
+          /* Snap to final discrete brush position with 0.2s animation */
+          int child_brush_min = 0;
+          int child_brush_max = 4;
+          
+          /* Calculate final snapped position based on cur_brush */
+          float final_pos = (float)(cur_brush - child_brush_min) / (float)(child_brush_max - child_brush_min);
+          
+          /* Start snap animation with 0.1s duration (fast snap) */
+          slider_start_pos = slider_current_pos;  /* Remember where we're animating from */
+          slider_target_pos = final_pos;
+          slider_anim_start_time = SDL_GetTicks();
+          slider_anim_duration = 100;  /* 0.1s for fast snap animation */
+          
+          SDL_Log("SLIDER RELEASE: cur_brush=%d, snapping from %.2f to %.2f with 0.1s animation", 
+                  cur_brush, slider_start_pos, final_pos);
+        }
+        
         if (scrolling_selector)
         {
           if (scrolltimer_selector != TIMERID_NONE)
@@ -6420,6 +6707,65 @@ static void mainloop(void)
       }
       else if (event.type == SDL_MOUSEMOTION && !ignoring_motion)
       {
+#ifdef __ANDROID__
+        static int motion_log_count = 0;
+        if (motion_log_count++ % 30 == 0) {  /* Log every 30th motion to avoid spam */
+          __android_log_print(ANDROID_LOG_INFO, "TuxPaint", "MOUSEMOTION event cur_tool=%d ignoring_motion=%d", cur_tool, ignoring_motion);
+        }
+#endif
+
+        /* Handle slider dragging in child mode */
+        if (slider_dragging && child_mode && (cur_tool == TOOL_BRUSH || cur_tool == TOOL_LINES))
+        {
+          int slider_x, slider_y, slider_w, slider_h;
+          int motion_y;
+          float click_percentage;
+          int child_brush_min = 0;
+          int child_brush_max = 4;
+          
+          /* Calculate slider dimensions - MUST match draw_child_mode_brush_slider() */
+          slider_w = button_w - 20;
+          slider_h = (int)((r_colors.y - r_ttoolopt.h - 40) * 0.95);
+          slider_x = WINDOW_WIDTH - r_ttoolopt.w + (r_ttoolopt.w - slider_w) / 2;
+          slider_y = r_ttoolopt.h + 30;
+          
+          motion_y = event.motion.y;
+          
+          /* Clamp motion to slider bounds */
+          if (motion_y < slider_y) motion_y = slider_y;
+          if (motion_y > slider_y + slider_h) motion_y = slider_y + slider_h;
+          
+          /* Calculate position based on motion position */
+          click_percentage = (float)(motion_y - slider_y) / (float)slider_h;
+          
+          /* During drag, update position directly (no animation) for responsive feel */
+          slider_current_pos = click_percentage;
+          slider_target_pos = click_percentage;
+          slider_anim_duration = 0;  /* No animation during drag */
+          
+          /* Calculate target brush */
+          int new_brush = child_brush_min + (int)((click_percentage * (child_brush_max - child_brush_min + 1)));
+          
+          /* Clamp to valid range 0-4 */
+          if (new_brush < child_brush_min) new_brush = child_brush_min;
+          if (new_brush > child_brush_max) new_brush = child_brush_max;
+          
+          /* Only update if brush changed */
+          if (new_brush != cur_brush)
+          {
+            cur_brush = new_brush;
+            SDL_Log("SLIDER DRAG: motion_y=%d, pos=%.2f, new brush=%d", 
+                    motion_y, slider_current_pos, cur_brush);
+            
+            /* Update brush */
+            render_brush();
+          }
+          
+          /* Always redraw to show current position */
+          draw_child_mode_brush_slider();
+          SDL_Flip(screen);
+        }
+
         new_x = event.button.x - r_canvas.x;
         new_y = event.button.y - r_canvas.y;
 
@@ -6689,15 +7035,175 @@ static void mainloop(void)
         }
 
 
-        if (button_down || emulate_button_pressed)
+#if defined(__ANDROID__) && defined(ENABLE_MULTITOUCH)
+        int has_multitouch = (android_multitouch_get_count() >= 2 && cur_tool == TOOL_BRUSH);
+#else
+        int has_multitouch = 0;
+#endif
+        
+        if (button_down || emulate_button_pressed || has_multitouch)
         {
+#ifdef __ANDROID__
+          static int button_down_log = 0;
+          if (button_down_log++ % 30 == 0) {
+            __android_log_print(ANDROID_LOG_INFO, "TuxPaint", "button_down block: cur_tool=%d TOOL_BRUSH=%d button_down=%d has_multitouch=%d", 
+              cur_tool, TOOL_BRUSH, button_down, has_multitouch);
+          }
+#endif
           if (cur_tool == TOOL_BRUSH)
           {
             /* Pushing button and moving: Draw with the brush: */
 
-            brush_draw(old_x, old_y, new_x, new_y, 1);
-
-            playsound(screen, 0, paintsound(img_cur_brush_w), 0, event.button.x, SNDDIST_NEAR);
+            /* Finger 0 (primary): Drawn by SDL MOUSEMOTION events - only if button_down */
+            if (button_down || emulate_button_pressed) {
+              brush_draw(old_x, old_y, new_x, new_y, 1);
+              playsound(screen, 0, paintsound(img_cur_brush_w), 0, event.button.x, SNDDIST_NEAR);
+            }
+            
+#if defined(__ANDROID__) && defined(ENABLE_MULTITOUCH)
+            /* Store last end position for each finger to connect gaps between strokes */
+            typedef struct {
+              int valid;  // 1 if we have a previous end position
+              int x, y;   // Last end position
+              long pointer_id;  // To track if it's the same finger
+              Uint32 timestamp_ms;  // Time of last touch (SDL_GetTicks)
+            } FingerEndPos;
+            static FingerEndPos finger_end_pos[MAX_FINGERS] = {{0}};
+            
+            /* Multitouch: Use Android's direct touch data */
+            int numFingers = android_multitouch_get_count();
+            static int last_finger_count = 0;
+            static int finger_log_count = 0;
+            if (numFingers != last_finger_count || finger_log_count++ % 30 == 0) {
+              __android_log_print(ANDROID_LOG_INFO, "TuxPaint", "Android Multitouch: %d fingers detected while painting", numFingers);
+              last_finger_count = numFingers;
+            }
+            
+            if (numFingers >= 2)
+            {
+              
+              /* Draw strokes for ALL fingers */
+              for (int i = 0; i < numFingers && i < MAX_FINGERS; i++)
+              {
+                long pointer_id;
+                float screen_x, screen_y, last_screen_x, last_screen_y;
+                
+                int got_pointer = android_multitouch_get_pointer(i, &pointer_id, &screen_x, &screen_y, &last_screen_x, &last_screen_y);
+                
+                if (got_pointer)
+                {
+                  /* Convert to canvas coordinates */
+                  int canvas_x = (int)screen_x - r_canvas.x;
+                  int canvas_y = (int)screen_y - r_canvas.y;
+                  
+                  /* Use stored position if available, otherwise fall back to SDL's last position */
+                  int last_canvas_x, last_canvas_y;
+                  Uint32 current_time = SDL_GetTicks();
+                  Uint32 time_since_last_touch = 0;
+                  
+                  if (finger_end_pos[i].valid && finger_end_pos[i].pointer_id == pointer_id) {
+                    /* Use our stored last position for this finger */
+                    last_canvas_x = finger_end_pos[i].x;
+                    last_canvas_y = finger_end_pos[i].y;
+                    time_since_last_touch = current_time - finger_end_pos[i].timestamp_ms;
+                  } else {
+                    /* Fall back to SDL's last position */
+                    last_canvas_x = (int)last_screen_x - r_canvas.x;
+                    last_canvas_y = (int)last_screen_y - r_canvas.y;
+                  }
+                  
+                  int on_canvas = (canvas_x >= 0 && canvas_x < canvas->w &&
+                                   canvas_y >= 0 && canvas_y < canvas->h);
+                  
+                  /* Check if this finger is on canvas */
+                  if (on_canvas)
+                  {
+                    /* Find or allocate slot for this finger */
+                    int slot = -1;
+                    for (int s = 0; s < MAX_FINGERS; s++) {
+                      if (active_fingers[s].active && active_fingers[s].pointer_id == pointer_id) {
+                        slot = s;
+                        break;
+                      }
+                    }
+                    
+                    if (slot < 0) {
+                      /* Allocate new slot */
+                      for (int s = 0; s < MAX_FINGERS; s++) {
+                        if (!active_fingers[s].active) {
+                          slot = s;
+                          active_fingers[s].active = 1;
+                          active_fingers[s].pointer_id = pointer_id;
+                          
+                          // Mark this as first stroke for this finger
+                          finger_end_pos[i].valid = 0;
+                          break;
+                        }
+                      }
+                    }
+                    
+                    if (slot >= 0)
+                    {
+                      /* Draw stroke from last position to current position */
+                      /* Only connect if time gap is less than 150ms (finger still down) */
+                      if (last_canvas_x >= 0 && last_canvas_y >= 0 &&
+                          last_canvas_x < canvas->w && last_canvas_y < canvas->h &&
+                          time_since_last_touch < 150)
+                      {
+                        brush_draw(last_canvas_x, last_canvas_y, canvas_x, canvas_y, 1);
+                      }
+                      else if (time_since_last_touch >= 150) {
+                        __android_log_print(ANDROID_LOG_INFO, "TuxPaint", 
+                          "F%d: Time gap too large (%ums), starting new stroke", i, time_since_last_touch);
+                      }
+                      
+                      /* Always save current position and timestamp for next stroke (ensures continuous lines) */
+                      finger_end_pos[i].valid = 1;
+                      finger_end_pos[i].x = canvas_x;
+                      finger_end_pos[i].y = canvas_y;
+                      finger_end_pos[i].pointer_id = pointer_id;
+                      finger_end_pos[i].timestamp_ms = current_time;
+                    }
+                  }
+                }
+              }
+            }
+            
+            /* Clean up fingers that are no longer touching (always run, even if numFingers < 2) */
+            for (int slot = 0; slot < MAX_FINGERS; slot++)
+            {
+              if (active_fingers[slot].active)
+              {
+                int found = 0;
+                for (int i = 0; i < numFingers; i++)
+                {
+                  long pointer_id;
+                  if (android_multitouch_get_pointer(i, &pointer_id, NULL, NULL, NULL, NULL))
+                  {
+                    if (pointer_id == active_fingers[slot].pointer_id)
+                    {
+                      found = 1;
+                      break;
+                    }
+                  }
+                }
+                if (!found)
+                {
+                  __android_log_print(ANDROID_LOG_INFO, "TuxPaint", "Finger in slot %d (ID=%ld) lifted", slot, active_fingers[slot].pointer_id);
+                  
+                  /* Invalidate stored end position for this finger to prevent connecting to next stroke */
+                  for (int f = 0; f < MAX_FINGERS; f++) {
+                    if (finger_end_pos[f].valid && finger_end_pos[f].pointer_id == active_fingers[slot].pointer_id) {
+                      finger_end_pos[f].valid = 0;
+                      break;
+                    }
+                  }
+                  
+                  active_fingers[slot].active = 0;
+                }
+              }
+            }
+#endif /* __ANDROID__ && ENABLE_MULTITOUCH */
           }
           else if (cur_tool == TOOL_LINES)
           {
@@ -7152,6 +7658,25 @@ static void mainloop(void)
     if (motioner | hatmotioner)
       handle_motioners(oldpos_x, oldpos_y, motioner, hatmotioner, old_hat_ticks, val_x, val_y, valhat_x, valhat_y);
 
+#if defined(__ANDROID__) && defined(ENABLE_MULTITOUCH)
+    /* Multitouch is now handled inside the button_down block above */
+    /* No need to call multitouch_paint_now() here anymore */
+#endif
+
+    /* Update slider animation in child mode */
+    if (child_mode && slider_anim_duration > 0)
+    {
+      /* Get current animated position */
+      float prev_pos = slider_current_pos;
+      update_slider_animation();
+      
+      /* If position changed significantly, redraw */
+      if (fabs(slider_current_pos - prev_pos) > 0.001)
+      {
+        draw_child_mode_brush_slider();
+        SDL_Flip(screen);
+      }
+    }
 
     SDL_Delay(10);
   }
@@ -7176,6 +7701,117 @@ static void hide_blinking_cursor(void)
     draw_blinking_cursor();
   }
 }
+
+#if defined(__ANDROID__) && defined(ENABLE_MULTITOUCH)
+/**
+ * Android multitouch painting - draws strokes for fingers 1+
+ * Finger 0 is already handled by regular SDL MOUSEMOTION events
+ */
+static void android_multitouch_paint_now(void) {
+  static int call_count = 0;
+  call_count++;
+  
+  // Only check cur_tool, not button_down (button_down is only for Finger 0)
+  if (cur_tool != TOOL_BRUSH) {
+    static int skip_log = 0;
+    if (skip_log++ % 100 == 0) {
+      __android_log_print(ANDROID_LOG_WARN, "TuxPaint", 
+        "multitouch_paint_now SKIP: cur_tool=%d (need TOOL_BRUSH)", cur_tool);
+    }
+    return;
+  }
+  
+  int numFingers = android_multitouch_get_count();
+  if (call_count % 10 == 0) {
+    __android_log_print(ANDROID_LOG_INFO, "TuxPaint", 
+      "multitouch_paint_now: call#%d fingers=%d", call_count, numFingers);
+  }
+  
+  if (numFingers < 2) {
+    return;
+  }
+  
+  // Store last end position for each finger to connect gaps between strokes
+  typedef struct {
+    int valid;  // 1 if we have a previous end position
+    int x, y;   // Last end position
+    long pointer_id;  // To track if it's the same finger
+  } FingerEndPos;
+  static FingerEndPos finger_end_pos[MAX_FINGERS] = {{0}};
+  
+  // Safety check
+  if (!canvas) {
+    __android_log_print(ANDROID_LOG_ERROR, "TuxPaint", 
+      "❌ multitouch_paint_now: canvas is NULL!");
+    return;
+  }
+  
+  // Draw strokes for fingers 1+ (NOT finger 0)
+  for (int i = 1; i < numFingers && i < MAX_FINGERS; i++) {
+    long pointer_id;
+    float screen_x, screen_y, last_screen_x, last_screen_y;
+    
+    if (android_multitouch_get_pointer(i, &pointer_id, &screen_x, &screen_y, &last_screen_x, &last_screen_y)) {
+      int canvas_x = (int)screen_x - r_canvas.x;
+      int canvas_y = (int)screen_y - r_canvas.y;
+      int last_canvas_x = (int)last_screen_x - r_canvas.x;
+      int last_canvas_y = (int)last_screen_y - r_canvas.y;
+      
+      if (canvas_x >= 0 && canvas_x < canvas->w &&
+          canvas_y >= 0 && canvas_y < canvas->h) {
+        
+        // Check if we have a previous end position for this finger
+        if (finger_end_pos[i].valid && finger_end_pos[i].pointer_id == pointer_id) {
+          // Draw connection from old end position to new start position
+          if (last_canvas_x >= 0 && last_canvas_x < canvas->w &&
+              last_canvas_y >= 0 && last_canvas_y < canvas->h) {
+            
+            // Calculate gap between strokes (squared distance)
+            int gap_x = last_canvas_x - finger_end_pos[i].x;
+            int gap_y = last_canvas_y - finger_end_pos[i].y;
+            int gap_dist_sq = gap_x * gap_x + gap_y * gap_y;
+            
+            // Only connect if gap is reasonable (4 to 2500 pixels squared = 2-50 pixels)
+            if (gap_dist_sq > 4 && gap_dist_sq < 2500) {
+              static int gap_log = 0;
+              if (gap_log++ % 10 == 0) {
+                __android_log_print(ANDROID_LOG_INFO, "TuxPaint", 
+                  "🔗 GAP FILL Finger %d: (%d,%d)->(%d,%d) dist_sq=%d", 
+                  i, finger_end_pos[i].x, finger_end_pos[i].y, last_canvas_x, last_canvas_y, gap_dist_sq);
+              }
+              brush_draw(finger_end_pos[i].x, finger_end_pos[i].y, last_canvas_x, last_canvas_y, 0);
+            }
+          }
+        } else {
+          // First stroke for this finger or pointer_id changed
+          finger_end_pos[i].pointer_id = pointer_id;
+          __android_log_print(ANDROID_LOG_INFO, "TuxPaint", 
+            "🆕 NEW STROKE Finger %d (ID=%ld) at (%d,%d)", i, pointer_id, canvas_x, canvas_y);
+        }
+        
+        // Draw the current stroke segment
+        if (last_canvas_x >= 0 && last_canvas_x < canvas->w &&
+            last_canvas_y >= 0 && last_canvas_y < canvas->h &&
+            (canvas_x != last_canvas_x || canvas_y != last_canvas_y)) {
+          
+          static int draw_log = 0;
+          if (draw_log++ % 30 == 0) {
+            __android_log_print(ANDROID_LOG_INFO, "TuxPaint", 
+              "✏️ DRAW Finger %d: (%d,%d)->(%d,%d)", 
+              i, last_canvas_x, last_canvas_y, canvas_x, canvas_y);
+          }
+          brush_draw(last_canvas_x, last_canvas_y, canvas_x, canvas_y, 0);
+        }
+        
+        // Save end position for next stroke
+        finger_end_pos[i].valid = 1;
+        finger_end_pos[i].x = canvas_x;
+        finger_end_pos[i].y = canvas_y;
+      }
+    }
+  }
+}
+#endif
 
 /**
  * Draw & hide the blinking text entry cursor (caret),
@@ -9949,6 +10585,10 @@ static void create_button_labels(void)
   for (i = 0; i < NUM_TOOLS; i++)
     img_tool_names[i] = do_render_button_label(tool_names[i]);
 
+  /* Kids/Expert mode buttons (Row -1) */
+  img_kids_label = do_render_button_label(gettext("Kids"));
+  img_expert_label = do_render_button_label(gettext("Expert"));
+
   /* Magic Tools */
   for (i = 0; i < MAX_MAGIC_GROUPS; i++)
   {
@@ -10204,7 +10844,8 @@ static void draw_toolbar(void)
   /* FIXME: Only allow print if we have something to print! */
 
 
-  draw_image_title(TITLE_TOOLS, r_ttools);
+  /* Tools title removed - r_ttools area now used for SND/KID buttons */
+  /* draw_image_title(TITLE_TOOLS, r_ttools); */
 
 
 
@@ -10301,6 +10942,91 @@ static void draw_toolbar(void)
       SDL_BlitSurface(img_btn_off, NULL, screen, &dest);
     }
   }
+
+  draw_row_minus_1_buttons();
+}
+
+
+/**
+ * Draw the two toggle buttons at the very top covering the "Tools" label
+ */
+static void draw_row_minus_1_buttons(void)
+{
+  SDL_Rect dest;
+  SDL_Surface *button_body;
+  SDL_Surface *button_scaled;
+  SDL_Surface *button_color;
+  SDL_Surface *mode_icon;
+  SDL_Surface *mode_label;
+  SDL_Surface *txt;
+  SDL_Surface *icon_scaled;
+  SDL_Color text_color = { 0, 0, 0, 0 };    /* Black text */
+  SDL_Color grey_color = { 128, 128, 128, 0 }; /* Grey for muted */
+  int button_render_h = button_h - 20;  /* Reduced visual height for Row -1 buttons */
+  float scale_y = 1.04 * (float)button_render_h / button_h;  /* Scale factor for Y-axis */
+  float icon_scale = 0.7;  /* Scale icons to 70% (30% smaller) */
+
+#ifndef NOSOUND
+  /* Sound toggle button */
+  button_body = mute ? img_btn_off : img_btn_up;
+  button_color = mute ? img_grey : img_black;
+  
+  /* Scale button body to reduced height (squash vertically) */
+  button_scaled = rotozoomSurfaceXY(button_body, 0, 1.0, scale_y, SMOOTHING_ON);
+  if (button_scaled)
+  {
+    dest.x = r_sound_btn.x;
+    dest.y = r_sound_btn.y;
+    SDL_BlitSurface(button_scaled, NULL, screen, &dest);
+    SDL_FreeSurface(button_scaled);
+  }
+
+  /* Scale and draw speaker icon (with transparency preserved) */
+  icon_scaled = rotozoomSurfaceXY(img_sound_icon, 0, icon_scale, icon_scale, SMOOTHING_ON);
+  if (icon_scaled)
+  {
+    /* Position icon at top of button, horizontally centered */
+    dest.x = r_sound_btn.x + (r_sound_btn.w - icon_scaled->w) / 2;
+    dest.y = r_sound_btn.y + 2;  /* Top-aligned with small margin */
+    SDL_BlitSurface(icon_scaled, NULL, screen, &dest);
+    SDL_FreeSurface(icon_scaled);
+  }
+#endif
+
+  /* Child mode button - render like tool buttons with icon + label */
+  button_body = child_mode ? img_btn_down : img_btn_up;
+  button_color = img_black;
+  
+  /* Select icon and label based on current mode */
+  mode_icon = child_mode ? img_kids_icon : img_expert_icon;
+  mode_label = child_mode ? img_kids_label : img_expert_label;
+  
+  /* Scale button body to reduced height (squash vertically) */
+  button_scaled = rotozoomSurfaceXY(button_body, 0, 1.0, scale_y, SMOOTHING_ON);
+  if (button_scaled)
+  {
+    dest.x = r_childmode_btn.x;
+    dest.y = r_childmode_btn.y;
+    SDL_BlitSurface(button_scaled, NULL, screen, &dest);
+    SDL_FreeSurface(button_scaled);
+  }
+
+  /* Scale and draw icon (with transparency preserved) */
+  icon_scaled = rotozoomSurfaceXY(mode_icon, 0, icon_scale, icon_scale, SMOOTHING_ON);
+  if (icon_scaled)
+  {
+    /* Position icon at top of button, horizontally centered */
+    dest.x = r_childmode_btn.x + (button_w - icon_scaled->w) / 2;
+    dest.y = r_childmode_btn.y + 2;  /* Top-aligned with small margin */
+    SDL_BlitSurface(icon_scaled, NULL, screen, &dest);
+    SDL_FreeSurface(icon_scaled);
+  }
+
+  /* Apply color to label and draw it below the icon */
+  SDL_BlitSurface(button_color, NULL, mode_label, NULL);
+  dest.x = r_childmode_btn.x + (button_w - mode_label->w) / 2;
+  dest.y = r_childmode_btn.y + button_render_h - mode_label->h - 2;
+  SDL_BlitSurface(mode_label, NULL, screen, &dest);
 }
 
 
@@ -10615,10 +11341,42 @@ static unsigned draw_colors(unsigned action)
 
   for (i = 0; i < (unsigned int)NUM_COLORS; i++)
   {
+    SDL_Surface *btn_img = (colors_state == COLORSEL_ENABLE)
+                           ? img_color_btns[i + (i == cur_color) * NUM_COLORS] 
+                           : img_color_btn_off;
+    
     dest.x = r_colors.x + i % gd_colors.cols * color_button_w;
     dest.y = r_colors.y + i / gd_colors.cols * color_button_h;
-    SDL_BlitSurface((colors_state == COLORSEL_ENABLE)
-                    ? img_color_btns[i + (i == cur_color) * NUM_COLORS] : img_color_btn_off, NULL, screen, &dest);
+    dest.w = color_button_w;
+    dest.h = color_button_h;
+    
+    /* Special buttons (COLOR_SELECTOR, COLOR_PICKER, COLOR_MIXER) should NOT be stretched 
+       Only keep their clickable area stretched, but center the image at original size */
+    int is_special_button = (i == COLOR_SELECTOR || i == COLOR_PICKER || i == COLOR_MIXER);
+    
+    /* Scale button if size differs from original AND not a special button */
+    if (btn_img)
+    {
+      if ((btn_img->w != color_button_w || btn_img->h != color_button_h) && !is_special_button)
+      {
+        /* Normal color buttons: scale to fit stretched area */
+        SDL_Surface *scaled = thumbnail(btn_img, color_button_w, color_button_h, 0);
+        if (scaled)
+        {
+          SDL_BlitSurface(scaled, NULL, screen, &dest);
+          SDL_FreeSurface(scaled);
+        }
+        else
+        {
+          SDL_BlitSurface(btn_img, NULL, screen, &dest);
+        }
+      }
+      else
+      {
+        /* Special buttons or normal size: always draw at original size without centering */
+        SDL_BlitSurface(btn_img, NULL, screen, &dest);
+      }
+    }
   }
   update_screen_rect(&r_colors);
 
@@ -10626,7 +11384,8 @@ static unsigned draw_colors(unsigned action)
   if (colors_state == old_colors_state)
     return old_colors_state;
 
-  /* If more than one colors rows, fill the parts of the r_tcolors not covered by the title. */
+  /* "Colors" label rendering disabled - label removed to give more space to buttons */
+  /* 
   if (gd_colors.rows > 1)
     SDL_FillRect(screen, &r_tcolors, SDL_MapRGBA(screen->format, 255, 255, 255, 255));
 
@@ -10644,8 +11403,172 @@ static unsigned draw_colors(unsigned action)
   }
 
   update_screen_rect(&r_tcolors);
+  */
+
+  draw_row_minus_1_buttons();
 
   return old_colors_state;
+}
+
+
+/**
+ * Easing function for slider animation (ease-out cubic)
+ * @param t Current time (0.0 to 1.0)
+ * @return Eased value (0.0 to 1.0)
+ */
+static float ease_out_cubic(float t)
+{
+  float f = t - 1.0f;
+  return f * f * f + 1.0f;
+}
+
+/**
+ * Update slider animation state
+ * Updates the global slider_current_pos based on animation progress
+ */
+static void update_slider_animation(void)
+{
+  if (slider_anim_duration <= 0)
+  {
+    /* No animation, set to target immediately */
+    slider_current_pos = slider_target_pos;
+    return;
+  }
+  
+  Uint32 current_time = SDL_GetTicks();
+  Uint32 elapsed = current_time - slider_anim_start_time;
+  
+  if (elapsed >= slider_anim_duration)
+  {
+    /* Animation finished */
+    slider_current_pos = slider_target_pos;
+    slider_anim_duration = 0;  /* Stop animation */
+  }
+  else
+  {
+    /* Calculate eased progress (0.0 to 1.0) */
+    float t = (float)elapsed / (float)slider_anim_duration;
+    float eased_t = ease_out_cubic(t);
+    
+    /* Interpolate between start and target positions */
+    slider_current_pos = slider_start_pos + (slider_target_pos - slider_start_pos) * eased_t;
+  }
+}
+
+/**
+ * Draw brush size slider for child mode (replaces brush selection buttons)
+ */
+static void draw_child_mode_brush_slider(void)
+{
+  SDL_Rect dest, slider_rect, handle_rect;
+  int slider_x, slider_y, slider_w, slider_h;
+  int handle_y, handle_size;
+  float brush_percentage;
+  
+  SDL_Log("draw_child_mode_brush_slider() called, cur_brush=%d, num_brushes=%d", cur_brush, num_brushes);
+  
+  /* Clear the entire right panel area */
+  /* In child mode, r_colors.h extends to bottom, so use r_colors.y for height calculation */
+  dest.x = WINDOW_WIDTH - r_ttoolopt.w;
+  dest.y = 0;
+  dest.w = r_ttoolopt.w;
+  dest.h = r_colors.y;  /* Clear from top to where colors start */
+  SDL_Log("Clearing right panel: x=%d, y=%d, w=%d, h=%d (r_colors.y=%d)", dest.x, dest.y, dest.w, dest.h, r_colors.y);
+  SDL_FillRect(screen, &dest, SDL_MapRGB(screen->format, 255, 255, 255));  /* White background */
+  
+  /* Draw title "Size" */
+  draw_image_title(TITLE_BRUSHES, r_ttoolopt);
+  
+  /* Calculate slider dimensions - make it large and centered */
+  slider_w = button_w - 20;  /* Slightly narrower than button width */
+  /* In child mode, r_colors extends to bottom, so use r_colors.y instead */
+  /* Compress by 5% to avoid overlapping neighboring elements */
+  slider_h = (int)((r_colors.y - r_ttoolopt.h - 40) * 0.95);
+  slider_x = WINDOW_WIDTH - r_ttoolopt.w + (r_ttoolopt.w - slider_w) / 2;
+  slider_y = r_ttoolopt.h + 30;  /* Add extra margin at top */
+  
+  SDL_Log("Slider dimensions: x=%d, y=%d, w=%d, h=%d (r_colors.y=%d, r_colors.h=%d)", 
+          slider_x, slider_y, slider_w, slider_h, r_colors.y, r_colors.h);
+  
+  /* Calculate handle position using animated slider position */
+  /* In child mode, slider only uses brushes 0-4 */
+  int child_brush_min = 0;  /* Brush index 0 */
+  int child_brush_max = 4;  /* Brush index 4 */
+  
+  /* Clamp cur_brush to range 0-4 (for handle size calculation) */
+  if (cur_brush < child_brush_min) cur_brush = child_brush_min;
+  if (cur_brush > child_brush_max) cur_brush = child_brush_max;
+  
+  /* Update animation and use current animated position (0.0 to 1.0) */
+  update_slider_animation();
+  brush_percentage = slider_current_pos;
+  
+  SDL_Log("Handle position: cur_brush=%d, animated_percentage=%.2f", cur_brush, brush_percentage);
+  
+  /* Calculate handle position */
+  int handle_center_x = slider_x + slider_w / 2;
+  int handle_center_y = slider_y + (int)(slider_h * brush_percentage);
+  
+  /* Slider track dimensions (thin vertical line) */
+  int track_width = 8;
+  int track_x = handle_center_x - track_width / 2;
+  
+  /* Draw upper part of slider track (light blue, from top to handle) */
+  slider_rect.x = track_x;
+  slider_rect.y = slider_y;
+  slider_rect.w = track_width;
+  slider_rect.h = handle_center_y - slider_y;
+  SDL_FillRect(screen, &slider_rect, SDL_MapRGB(screen->format, 100, 180, 255));  /* Light blue */
+  
+  /* Draw lower part of slider track (gray, from handle to bottom) */
+  slider_rect.x = track_x;
+  slider_rect.y = handle_center_y;
+  slider_rect.w = track_width;
+  slider_rect.h = (slider_y + slider_h) - handle_center_y;
+  SDL_FillRect(screen, &slider_rect, SDL_MapRGB(screen->format, 200, 200, 200));  /* Light gray */
+  
+  /* Calculate handle radii - constant white border (4px), variable total radius:
+   * cur_brush=0: total_radius=30, inner_radius=26, border=4 (top - small)
+   * cur_brush=1: total_radius=35, inner_radius=31, border=4
+   * cur_brush=2: total_radius=40, inner_radius=36, border=4
+   * cur_brush=3: total_radius=45, inner_radius=41, border=4
+   * cur_brush=4: total_radius=50, inner_radius=46, border=4 (bottom - large)
+   */
+  int white_border_thickness = 4;  /* Constant 4px white border */
+  int total_radius = 30 + cur_brush * 5;  /* Increases from 30 (brush 0) to 50 (brush 4) */
+  int inner_radius = total_radius - white_border_thickness;  /* Blue circle radius */
+  
+  SDL_Log("Handle: inner_radius=%d, border_thickness=%d, total=%d", inner_radius, white_border_thickness, total_radius);
+  
+  /* Draw handle: white outer circle, then blue inner circle */
+  Uint32 white_color = SDL_MapRGB(screen->format, 255, 255, 255);  /* White */
+  Uint32 blue_color = SDL_MapRGB(screen->format, 100, 180, 255);   /* Light blue */
+  
+  /* Draw outer white circle */
+  for (int y = -total_radius; y <= total_radius; y++)
+  {
+    int x_width = (int)sqrt((float)(total_radius * total_radius - y * y));
+    SDL_Rect line;
+    line.x = handle_center_x - x_width;
+    line.y = handle_center_y + y;
+    line.w = x_width * 2;
+    line.h = 1;
+    SDL_FillRect(screen, &line, white_color);
+  }
+  
+  /* Draw inner blue circle */
+  for (int y = -inner_radius; y <= inner_radius; y++)
+  {
+    int x_width = (int)sqrt((float)(inner_radius * inner_radius - y * y));
+    SDL_Rect line;
+    line.x = handle_center_x - x_width;
+    line.y = handle_center_y + y;
+    line.w = x_width * 2;
+    line.h = 1;
+    SDL_FillRect(screen, &line, blue_color);
+  }
+  
+  /* No brush preview needed - the circle size itself shows the brush size */
 }
 
 
@@ -10658,6 +11581,15 @@ static void draw_brushes(void)
   int i, off_y, max, brush;
   SDL_Rect src, dest;
   int most;
+
+  /* In child mode, show brush size slider instead of brush buttons */
+  SDL_Log("draw_brushes() called, child_mode=%d, cur_tool=%d, TOOL_BRUSH=%d, TOOL_LINES=%d", child_mode, cur_tool, TOOL_BRUSH, TOOL_LINES);
+  if (child_mode && (cur_tool == TOOL_BRUSH || cur_tool == TOOL_LINES))
+  {
+    SDL_Log("Calling draw_child_mode_brush_slider()");
+    draw_child_mode_brush_slider();
+    return;
+  }
 
   /* Draw the title: */
   draw_image_title(TITLE_BRUSHES, r_ttoolopt);
@@ -10710,6 +11642,7 @@ static void draw_brushes(void)
 
 
   /* Draw each of the shown brushes: */
+  SDL_Log("DRAWING BRUSH BUTTONS: child_mode=%d, brush_scroll=%d, max=%d, num_brushes=%d", child_mode, brush_scroll, max, num_brushes);
 
   for (brush = brush_scroll; brush < brush_scroll + max; brush++)
   {
@@ -10718,6 +11651,8 @@ static void draw_brushes(void)
 
     dest.x = ((i % 2) * button_w) + (WINDOW_WIDTH - r_ttoolopt.w);
     dest.y = ((i / 2) * button_h) + r_ttoolopt.h + off_y;
+
+    SDL_Log("  Drawing brush button #%d at (%d,%d)", brush, dest.x, dest.y);
 
     if (brush == cur_brush)
     {
@@ -13039,6 +13974,51 @@ static void enable_avail_tools(void)
 {
   int i;
 
+  for (i = 0; i < NUM_TOOLS; i++)
+  {
+    tool_avail[i] = tool_avail_bak[i];
+  }
+}
+
+
+/**
+ * Apply child mode tool restrictions
+ */
+static void apply_child_mode_tool_filter(void)
+{
+  int i;
+  
+  /* Save current tool_avail state */
+  for (i = 0; i < NUM_TOOLS; i++)
+  {
+    tool_avail_bak[i] = tool_avail[i];
+  }
+  
+  /* Disable all tools first */
+  for (i = 0; i < NUM_TOOLS; i++)
+  {
+    tool_avail[i] = 0;
+  }
+  
+  /* Enable only child-mode-friendly tools */
+  tool_avail[TOOL_BRUSH] = 1;
+  tool_avail[TOOL_ERASER] = 1;
+  tool_avail[TOOL_FILL] = 1;
+  tool_avail[TOOL_UNDO] = tool_avail_bak[TOOL_UNDO];  /* Keep undo state */
+  tool_avail[TOOL_REDO] = tool_avail_bak[TOOL_REDO];  /* Keep redo state */
+  tool_avail[TOOL_NEW] = 1;
+  tool_avail[TOOL_SAVE] = tool_avail_bak[TOOL_SAVE];  /* Keep save state */
+}
+
+
+/**
+ * Remove child mode tool restrictions
+ */
+static void remove_child_mode_tool_filter(void)
+{
+  int i;
+  
+  /* Restore original tool_avail state */
   for (i = 0; i < NUM_TOOLS; i++)
   {
     tool_avail[i] = tool_avail_bak[i];
@@ -22326,6 +23306,7 @@ static void load_magic_plugins(void)
   while (num_magics[magic_group] == 0 && tries < MAX_MAGIC_GROUPS)
   {
     magic_group++;
+    tries++;
     if (magic_group >= MAX_MAGIC_GROUPS)
     {
       magic_group = 0;
@@ -24054,6 +25035,49 @@ static int do_new_dialog_add_colors(SDL_Surface **thumbs, int num_files,
   return num_files;
 }
 
+
+#ifdef ENABLE_MULTITOUCH
+/**
+ * Find existing finger slot by finger ID
+ */
+static int find_finger_slot(SDL_FingerID finger_id)
+{
+  for (int i = 0; i < MAX_FINGERS; i++) {
+    if (active_fingers[i].active && active_fingers[i].pointer_id == finger_id) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Allocate a new finger slot
+ */
+static int allocate_finger_slot(SDL_FingerID finger_id)
+{
+  for (int i = 0; i < MAX_FINGERS; i++) {
+    if (!active_fingers[i].active) {
+      active_fingers[i].active = 1;
+      active_fingers[i].pointer_id = finger_id;
+      num_active_fingers++;
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Release a finger slot
+ */
+static void release_finger_slot(int slot)
+{
+  if (slot >= 0 && slot < MAX_FINGERS && active_fingers[slot].active) {
+    active_fingers[slot].active = 0;
+    num_active_fingers--;
+    if (num_active_fingers < 0) num_active_fingers = 0;
+  }
+}
+#endif
 
 /**
  * FIXME
@@ -29785,6 +30809,18 @@ static void setup(void)
   if (!fullscreen)
     init_flags |= SDL_INIT_NOPARACHUTE; /* allow debugger to catch crash */
 
+  /* Fix Android EGL threading issues - ensure GL context stays on render thread */
+#ifdef __ANDROID__
+  /* Always convert touch to mouse events (required for UI interaction) */
+  SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "1");
+  SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+  SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengles2");
+  SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+  SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");
+  /* Prevent EGL context from being made current on multiple threads */
+  SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "1");
+#endif
+
   /* Init SDL */
   if (SDL_Init(init_flags) < 0)
   {
@@ -29996,7 +31032,12 @@ static void setup(void)
 
     /* FIXME: Check window_screen for being NULL, and abort?! (Also see below) -bjk 2024.12.20 */
 
+#ifdef __ANDROID__
+    /* On Android, use accelerated renderer to ensure proper GL context threading */
+    renderer = SDL_CreateRenderer(window_screen, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+#else
     renderer = SDL_CreateRenderer(window_screen, -1, 0);
+#endif
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
 
     if (native_screensize)
@@ -30179,7 +31220,12 @@ static void setup(void)
     SDL_SetWindowMaximumSize(window_screen, WINDOW_WIDTH, WINDOW_HEIGHT);
 
 
+#ifdef __ANDROID__
+    /* On Android, use accelerated renderer to ensure proper GL context threading */
+    renderer = SDL_CreateRenderer(window_screen, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+#else
     renderer = SDL_CreateRenderer(window_screen, -1, 0);
+#endif
     SDL_GL_GetDrawableSize(window_screen, &ww, &hh);
     texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB888, SDL_TEXTUREACCESS_STATIC, ww, hh);
 
@@ -30236,6 +31282,7 @@ static void setup(void)
 
   SDL_FillRect(screen, NULL, SDL_MapRGB(screen->format, 255, 255, 255));
 
+#ifndef __ANDROID__
   dest.x = ((WINDOW_WIDTH - img_title->w - (img_title_tuxpaint->w / 2)) / 2) + (img_title_tuxpaint->w / 2) + 20;
   dest.y = (WINDOW_HEIGHT - img_title->h);
 
@@ -30253,6 +31300,7 @@ static void setup(void)
   dest.y = 5;
 
   SDL_BlitSurface(img_title_credits, NULL, screen, &dest);
+#endif
 
   prog_bar_ctr = 0;
   show_progress_bar(screen);
@@ -30292,6 +31340,7 @@ static void setup(void)
 
   /* Let Pango & fontcache do their work without locking up */
 
+#ifndef __ANDROID__
   fontconfig_thread_done = 0;
 
   DEBUG_PRINTF("Spawning Pango thread\n");
@@ -30317,6 +31366,11 @@ static void setup(void)
     }
     DEBUG_PRINTF("Done generating cache\n");
   }
+#else
+  /* On Android, skip font cache generation to speed up startup */
+  fontconfig_thread_done = 1;
+  DEBUG_PRINTF("Android: Skipping fontconfig cache generation\n");
+#endif
 
 
 #ifdef FORKED_FONTS
@@ -30342,14 +31396,17 @@ static void setup(void)
 
   safe_snprintf(tmp_str, sizeof(tmp_str), "Version: %s – %s", VER_VERSION, VER_DATE);
 
+#ifndef __ANDROID__
   tmp_surf = render_text(medium_font, tmp_str, black);
   dest.x = 10;
   dest.y = WINDOW_HEIGHT - img_progress->h - tmp_surf->h;
   SDL_BlitSurface(tmp_surf, NULL, screen, &dest);
   SDL_FreeSurface(tmp_surf);
+#endif
 
   DEBUG_PRINTF("%s\n", tmp_str);
 
+#ifndef __ANDROID__
   safe_snprintf(tmp_str, sizeof(tmp_str), "© 2002–2024 Bill Kendrick, et al.");
   tmp_surf = render_text(medium_font, tmp_str, black);
   dest.x = 10;
@@ -30358,12 +31415,20 @@ static void setup(void)
   SDL_FreeSurface(tmp_surf);
 
   SDL_Flip(screen);
+#endif
 
 
 #ifdef FORKED_FONTS
   reliable_write(font_socket_fd, &no_system_fonts, sizeof no_system_fonts);
 #else
+#ifndef __ANDROID__
   font_thread = SDL_CreateThread(load_user_fonts_stub, "font_thread", NULL);
+#else
+  /* On Android, skip font loading thread - fonts will be loaded on demand */
+  DEBUG_PRINTF("Android: Skipping font loading thread\n");
+  font_thread_done = 1;
+  font_thread_aborted = 0;
+#endif
 #endif
 
   /* continuing on with the rest of the cursors... */
@@ -30491,6 +31556,11 @@ static void setup(void)
 
   for (i = 0; i < NUM_TOOLS; i++)
     img_tools[i] = loadimagerb(tool_img_fnames[i]);
+
+  /* Load Kids/Expert/Sound icons */
+  img_kids_icon = loadimagerb(DATA_PREFIX "images/ui/kids_icon.png");
+  img_expert_icon = loadimagerb(DATA_PREFIX "images/ui/expert_icon.png");
+  img_sound_icon = loadimagerb(DATA_PREFIX "images/ui/sound_icon.png");
 
   img_title_on = loadimagerb(DATA_PREFIX "images/ui/title.png");
   img_title_large_on = loadimagerb(DATA_PREFIX "images/ui/title_large.png");
@@ -30753,7 +31823,9 @@ static void setup(void)
   for (i = 0; i < NUM_TIP_TUX; i++)
     img_tux[i] = loadimagerb(tux_img_fnames[i]);
 
+
   show_progress_bar(screen);
+
 
   img_mouse = loadimagerb(DATA_PREFIX "images/ui/mouse.png");
   img_mouse_click = loadimagerb(DATA_PREFIX "images/ui/mouse_click.png");
@@ -30762,6 +31834,7 @@ static void setup(void)
 
   img_color_picker = loadimagerb(DATA_PREFIX "images/ui/color_picker.png");
   img_color_picker_val = loadimagerb(DATA_PREFIX "images/ui/color_picker_val.png");
+
 
   /* Create toolbox and selector labels: */
 
@@ -30788,7 +31861,9 @@ static void setup(void)
 
 
 
+
   /* Generate color selection buttons: */
+
 
   /* Create appropriately-shaped buttons: */
   img1 = loadimage(DATA_PREFIX "images/ui/paintwell.png");
@@ -30932,6 +32007,20 @@ static void setup(void)
     }
   }
 
+  /* (Kids/Expert mode buttons - Row -1) */
+  if (img_kids_icon->h + img_kids_label->h > button_h - 1)
+  {
+    tmp_surf = thumbnail(img_kids_icon, img_kids_icon->w, (button_h - img_kids_label->h - 1), 0);
+    SDL_FreeSurface(img_kids_icon);
+    img_kids_icon = tmp_surf;
+  }
+  if (img_expert_icon->h + img_expert_label->h > button_h - 1)
+  {
+    tmp_surf = thumbnail(img_expert_icon, img_expert_icon->w, (button_h - img_expert_label->h - 1), 0);
+    SDL_FreeSurface(img_expert_icon);
+    img_expert_icon = tmp_surf;
+  }
+
   /* (Magic tools) */
   for (i = 0; i < MAX_MAGIC_GROUPS; i++)
   {
@@ -31012,6 +32101,7 @@ static void claim_to_be_ready(void)
 
   /* Let the user know we're (nearly) ready now */
 
+#ifndef __ANDROID__
   dest.x = 0;
   dest.y = WINDOW_HEIGHT - img_progress->h;
   dest.h = img_progress->h;
@@ -31023,6 +32113,7 @@ static void claim_to_be_ready(void)
   src.y = img_title->h - img_progress->h;
   dest.x = ((WINDOW_WIDTH - img_title->w - (img_title_tuxpaint->w / 2)) / 2) + (img_title_tuxpaint->w / 2) + 20;
   SDL_BlitSurface(img_title, &src, screen, &dest);
+#endif
 
   SDL_FreeSurface(img_title);
   SDL_FreeSurface(img_title_credits);
@@ -31049,7 +32140,7 @@ static void claim_to_be_ready(void)
   cur_tool = TOOL_BRUSH;
   cur_color = COLOR_BLACK;
   colors_are_selectable = 1;
-  cur_brush = 0;
+  cur_brush = 1;  /* Start with second brush (4px) instead of thinnest */
   for (i = 0; i < MAX_STAMP_GROUPS; i++)
     cur_stamp[i] = 0;
   cur_shape = SHAPE_SQUARE;
@@ -31121,6 +32212,15 @@ static void claim_to_be_ready(void)
  */
 int main(int argc, char *argv[])
 {
+#ifdef __ANDROID__
+  __android_log_print(ANDROID_LOG_INFO, "TuxPaint", "=== TUXPAINT MAIN STARTED ===");
+#ifdef ENABLE_MULTITOUCH
+  __android_log_print(ANDROID_LOG_INFO, "TuxPaint", "MULTITOUCH SUPPORT: ENABLED");
+#else
+  __android_log_print(ANDROID_LOG_INFO, "TuxPaint", "MULTITOUCH SUPPORT: DISABLED");
+#endif
+#endif
+
 #ifdef DEBUG
   CLOCK_TYPE time1;
   CLOCK_TYPE time2;
@@ -31871,7 +32971,7 @@ static void convert_motion_to_wheel(SDL_Event event)
   {
     while (motion_dy - high > 0)
     {
-      SDL_SendMouseWheel(NULL, event.motion.which, 0, 1);
+      SDL_SendMouseWheel(NULL, event.motion.which, 0.0f, 1.0f, SDL_MOUSEWHEEL_NORMAL);
       motion_dy -= high;
     }
   }
@@ -31879,7 +32979,7 @@ static void convert_motion_to_wheel(SDL_Event event)
   {
     while (motion_dy + high < 0)
     {
-      SDL_SendMouseWheel(NULL, event.motion.which, 0, -1);
+      SDL_SendMouseWheel(NULL, event.motion.which, 0.0f, -1.0f, SDL_MOUSEWHEEL_NORMAL);
       motion_dy += high;
     }
   }
