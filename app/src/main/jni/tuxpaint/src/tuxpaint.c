@@ -3763,12 +3763,24 @@ static void mainloop(void)
             {
               cur_tool = TOOL_BRUSH;
             }
-            cur_brush = 3;  /* Select aa_round_24.png (24px brush - good size for kids) */
+            
+            /* Keep the selected brush from expert mode, but clamp to kids mode range (0-4) */
+            /* If brush is beyond the range, set it to the largest brush (position 4) */
+            int child_brush_min = 0;
+            int child_brush_max = 4;
+            if (cur_brush > child_brush_max)
+            {
+              cur_brush = child_brush_max;  /* Use largest brush in kids mode */
+            }
+            else if (cur_brush < child_brush_min)
+            {
+              cur_brush = child_brush_min;  /* Use smallest brush in kids mode */
+            }
+            /* Otherwise, keep the current brush selection */
+            
             brush_scroll = 0;  /* Ensure we scroll to top so brush is visible */
             
             /* Initialize slider animation state */
-            int child_brush_min = 0;
-            int child_brush_max = 4;
             float initial_pos = (float)(cur_brush - child_brush_min) / (float)(child_brush_max - child_brush_min);
             slider_current_pos = initial_pos;
             slider_target_pos = initial_pos;
