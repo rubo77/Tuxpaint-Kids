@@ -51,16 +51,16 @@ android {
             if (buildAsApplication) {
                 dimension "store"
                 applicationId "org.tuxpaint.android"
-                versionCode 9350
-                versionName "0.9.35"
+                versionCode 20001
+                versionName "2.0.01"
             }
         }
         offPlayStore {
             if (buildAsApplication) {
                 dimension "store"
                 applicationId "org.tuxpaint"
-                versionCode 9350
-                versionName "0.9.35"
+                versionCode 20001
+                versionName "2.0.01"
             }
         }
     }
