@@ -841,6 +841,56 @@ static int child_brush_count = 5;     /* Number of brushes in current category *
 static int child_brush_use_icons = 0; /* 1 if category should show icons on handle */
 static int child_brush_variable_size = 1; /* 1 if handle size should vary, 0 for constant size */
 
+/* Brush category definition structure */
+typedef struct {
+  int category_id;            /* Category ID (1-10) */
+  const char *name;           /* Category name for debugging */
+  int brush_ids[13];          /* Array of brush IDs in this category */
+  int count;                  /* Number of brushes in this category */
+  int use_icons;              /* 1 if category should show icons on handle */
+  int variable_size;          /* 1 if handle size should vary, 0 for constant size */
+} brush_category_t;
+
+/* Global brush category definitions - used by both child and expert modes */
+static const brush_category_t brush_categories[] = {
+  /* Category 1: Standard brushes */
+  {1, "Standard brushes", {0, 1, 2, 3, 4}, 5, 0, 1},
+  
+  /* Category 2: Special round brushes */
+  {2, "Special round brushes", {7, 8, 5, 6, 37, 36}, 6, 0, 1},
+  
+  /* Category 3: Mixed icon brushes */
+  {3, "Mixed icon brushes", {35, 34, 48, 30, 39, 33, 38, 49, 51, 54, 65, 66, 67}, 13, 1, 0},
+  
+  /* Category 4: Shapes */
+  {4, "Shapes", {19, 31, 32, 40, 61, 63, 64, 68, 50, 52}, 10, 1, 0},
+  
+  /* Category 5: Flowers */
+  {5, "Flowers", {20, 21, 22, 23, 24}, 5, 1, 1},
+  
+  /* Category 6: Animals & Nature */
+  {6, "Animals & Nature", {14, 15, 16, 27, 28, 29, 53}, 7, 1, 0},
+  
+  /* Category 7: Slash lines */
+  {7, "Slash lines", {42, 43, 44, 45, 46, 47}, 6, 1, 1},
+  
+  /* Category 8: Squares */
+  {8, "Squares", {55, 56, 57, 58, 59, 60}, 6, 1, 1},
+  
+  /* Category 9: Texture brushes */
+  {9, "Texture brushes", {9, 25, 26, 62}, 4, 1, 0},
+  
+  /* Category 10: Effect brushes */
+  {10, "Effect brushes", {10, 11, 12, 13, 17, 18, 41}, 7, 1, 0}
+};
+
+#define NUM_BRUSH_CATEGORIES (sizeof(brush_categories) / sizeof(brush_categories[0]))
+
+/* Sorted brush array - maps display order to actual brush IDs */
+static int sorted_brushes[100];  /* Large enough to hold all brushes */
+static int sorted_brush_count = 0;
+static int brush_to_sorted_index[100];  /* Reverse mapping: brush_id -> sorted index */
+
 static int colors_rows;
 
 static int buttons_tall;        /* promoted to a global variable from setup_normal_screen_layout() */
@@ -2192,6 +2242,8 @@ static void draw_child_mode_brush_slider(void);
 static void update_slider_animation(void);
 static void check_child_mode_longpress(void);
 static void init_child_brush_category(int expert_mode_brush);
+static void init_sorted_brushes(void);
+static const brush_category_t* find_brush_category(int brush_id);
 static void draw_brushes(void);
 static void draw_brushes_spacing(void);
 static void draw_stamps(void);
@@ -2881,7 +2933,7 @@ static void mainloop(void)
   char angle_tool_text[256];    // FIXME Consider malloc'ing
   char stretch_tool_text[256];  // FIXME Consider malloc'ing
 
-  num_things = num_brushes;
+  num_things = sorted_brush_count;
   thing_scroll = &brush_scroll;
   cur_thing = 0;
   do_draw = 0;
@@ -4010,8 +4062,8 @@ static void mainloop(void)
               if (cur_tool == TOOL_BRUSH)
               {
                 keybd_flag = 0;
-                cur_thing = cur_brush;
-                num_things = num_brushes;
+                cur_thing = brush_to_sorted_index[cur_brush];
+                num_things = sorted_brush_count;
                 thing_scroll = &brush_scroll;
                 draw_brushes();
                 draw_colors(COLORSEL_ENABLE);
@@ -4031,8 +4083,8 @@ static void mainloop(void)
               else if (cur_tool == TOOL_LINES)
               {
                 keybd_flag = 0;
-                cur_thing = cur_brush;
-                num_things = num_brushes;
+                cur_thing = brush_to_sorted_index[cur_brush];
+                num_things = sorted_brush_count;
                 thing_scroll = &brush_scroll;
                 draw_brushes();
                 draw_colors(COLORSEL_ENABLE);
@@ -5428,7 +5480,8 @@ static void mainloop(void)
 
             if (cur_tool == TOOL_BRUSH || cur_tool == TOOL_LINES)
             {
-              cur_brush = cur_thing;
+              /* cur_thing is now the sorted index, convert to brush_id */
+              cur_brush = sorted_brushes[cur_thing];
               render_brush();
 
 #ifdef __ANDROID__
@@ -11967,121 +12020,96 @@ static float ease_out_cubic(float t)
 }
 
 /**
+ * Initialize sorted brush array based on category definitions
+ * This creates a display order where brushes are grouped by category
+ */
+static void init_sorted_brushes(void)
+{
+  int i, j;
+  
+  sorted_brush_count = 0;
+  
+  /* Initialize reverse mapping to -1 (not found) */
+  for (i = 0; i < 100; i++) {
+    brush_to_sorted_index[i] = -1;
+  }
+  
+  /* Build sorted array by iterating through categories */
+  for (i = 0; i < NUM_BRUSH_CATEGORIES; i++) {
+    for (j = 0; j < brush_categories[i].count; j++) {
+      int brush_id = brush_categories[i].brush_ids[j];
+      
+      /* Only add if brush_id is valid and within bounds */
+      if (brush_id >= 0 && brush_id < num_brushes) {
+        sorted_brushes[sorted_brush_count] = brush_id;
+        brush_to_sorted_index[brush_id] = sorted_brush_count;
+        sorted_brush_count++;
+      }
+    }
+  }
+  
+  /* Add any remaining brushes not in categories (shouldn't happen, but just in case) */
+  for (i = 0; i < num_brushes; i++) {
+    if (brush_to_sorted_index[i] == -1) {
+      sorted_brushes[sorted_brush_count] = i;
+      brush_to_sorted_index[i] = sorted_brush_count;
+      sorted_brush_count++;
+      SDL_Log("Warning: Brush %d not in any category, adding at end", i);
+    }
+  }
+  
+  SDL_Log("Initialized sorted brushes: %d brushes in %d categories", 
+          sorted_brush_count, NUM_BRUSH_CATEGORIES);
+}
+
+/**
+ * Find which category a brush belongs to
+ * @param brush_id The brush ID to look up
+ * @return Pointer to the category, or NULL if not found
+ */
+static const brush_category_t* find_brush_category(int brush_id)
+{
+  int i, j;
+  
+  for (i = 0; i < NUM_BRUSH_CATEGORIES; i++) {
+    for (j = 0; j < brush_categories[i].count; j++) {
+      if (brush_categories[i].brush_ids[j] == brush_id) {
+        return &brush_categories[i];
+      }
+    }
+  }
+  
+  return NULL;  /* Not found */
+}
+
+/**
  * Initialize child mode brush category based on expert mode brush
  * Determines which brush set to show in the child mode slider
+ * Uses global brush_categories array for consistency
  * @param expert_mode_brush The brush index that was active in expert mode
  */
 static void init_child_brush_category(int expert_mode_brush)
 {
-  child_brush_use_icons = 0;
-  child_brush_variable_size = 1;
+  const brush_category_t *category = find_brush_category(expert_mode_brush);
   
-  if (expert_mode_brush >= 0 && expert_mode_brush <= 4) {
-    /* Category 1: Standard brushes (0-4) */
-    child_brush_category = 1;
-    int brushes[] = {0, 1, 2, 3, 4};
-    memcpy(child_brush_indices, brushes, sizeof(brushes));
-    child_brush_count = 5;
-  }
-  else if (expert_mode_brush == 5 || expert_mode_brush == 6 || 
-           expert_mode_brush == 7 || expert_mode_brush == 8 ||
-           expert_mode_brush == 36 || expert_mode_brush == 37) {
-    /* Category 2: Special round brushes (7,8,5,6,37,36) */
-    child_brush_category = 2;
-    int brushes[] = {7, 8, 5, 6, 37, 36};
-    memcpy(child_brush_indices, brushes, sizeof(brushes));
-    child_brush_count = 6;
-  }
-  else if (expert_mode_brush == 35 || expert_mode_brush == 34 || expert_mode_brush == 48 ||
-           expert_mode_brush == 30 || expert_mode_brush == 39 || expert_mode_brush == 33 ||
-           expert_mode_brush == 38 || expert_mode_brush == 49 || expert_mode_brush == 51 ||
-           expert_mode_brush == 54 || expert_mode_brush == 65 || expert_mode_brush == 66 ||
-           expert_mode_brush == 67) {
-    /* Category 3: Mixed icon brushes */
-    child_brush_category = 3;
-    int brushes[] = {35, 34, 48, 30, 39, 33, 38, 49, 51, 54, 65, 66, 67};
-    memcpy(child_brush_indices, brushes, sizeof(brushes));
-    child_brush_count = 13;
-    child_brush_use_icons = 1;
-    child_brush_variable_size = 0;
-  }
-  else if (expert_mode_brush == 19 || expert_mode_brush == 31 || expert_mode_brush == 32 ||
-           expert_mode_brush == 40 || expert_mode_brush == 61 || expert_mode_brush == 63 ||
-           expert_mode_brush == 64 || expert_mode_brush == 68 || expert_mode_brush == 50 ||
-           expert_mode_brush == 52) {
-    /* Category 4: Shapes */
-    child_brush_category = 4;
-    int brushes[] = {19, 31, 32, 40, 61, 63, 64, 68, 50, 52};
-    memcpy(child_brush_indices, brushes, sizeof(brushes));
-    child_brush_count = 10;
-    child_brush_use_icons = 1;
-    child_brush_variable_size = 0;
-  }
-  else if (expert_mode_brush >= 20 && expert_mode_brush <= 24) {
-    /* Category 5: Flowers */
-    child_brush_category = 5;
-    int brushes[] = {20, 21, 22, 23, 24};
-    memcpy(child_brush_indices, brushes, sizeof(brushes));
-    child_brush_count = 5;
-    child_brush_use_icons = 1;
-    child_brush_variable_size = 1;
-  }
-  else if (expert_mode_brush == 14 || expert_mode_brush == 15 || expert_mode_brush == 16 ||
-           expert_mode_brush == 27 || expert_mode_brush == 28 || expert_mode_brush == 29 ||
-           expert_mode_brush == 53) {
-    /* Category 6: Animals & Nature (Critters, Footprints & Splats) */
-    child_brush_category = 6;
-    int brushes[] = {14, 15, 16, 27, 28, 29, 53};
-    memcpy(child_brush_indices, brushes, sizeof(brushes));
-    child_brush_count = 7;
-    child_brush_use_icons = 1;
-    child_brush_variable_size = 0;
-  }
-  else if (expert_mode_brush >= 42 && expert_mode_brush <= 47) {
-    /* Category 7: Slash lines */
-    child_brush_category = 7;
-    int brushes[] = {42, 43, 44, 45, 46, 47};
-    memcpy(child_brush_indices, brushes, sizeof(brushes));
-    child_brush_count = 6;
-    child_brush_use_icons = 1;
-    child_brush_variable_size = 1;
-  }
-  else if (expert_mode_brush >= 55 && expert_mode_brush <= 60) {
-    /* Category 8: Squares */
-    child_brush_category = 8;
-    int brushes[] = {55, 56, 57, 58, 59, 60};
-    memcpy(child_brush_indices, brushes, sizeof(brushes));
-    child_brush_count = 6;
-    child_brush_use_icons = 1;
-    child_brush_variable_size = 1;
-  }
-  else if (expert_mode_brush == 9 || expert_mode_brush == 25 || expert_mode_brush == 26 ||
-           expert_mode_brush == 62) {
-    /* Category 9: Texture brushes */
-    child_brush_category = 9;
-    int brushes[] = {9, 25, 26, 62};
-    memcpy(child_brush_indices, brushes, sizeof(brushes));
-    child_brush_count = 4;
-    child_brush_use_icons = 1;
-    child_brush_variable_size = 0;
-  }
-  else if (expert_mode_brush == 10 || expert_mode_brush == 11 || expert_mode_brush == 12 ||
-           expert_mode_brush == 13 || expert_mode_brush == 17 || expert_mode_brush == 18 ||
-           expert_mode_brush == 41) {
-    /* Category 10: Effect brushes */
-    child_brush_category = 10;
-    int brushes[] = {10, 11, 12, 13, 17, 18, 41};
-    memcpy(child_brush_indices, brushes, sizeof(brushes));
-    child_brush_count = 7;
-    child_brush_use_icons = 1;
-    child_brush_variable_size = 0;
+  if (category != NULL) {
+    /* Found the category for this brush */
+    child_brush_category = category->category_id;
+    memcpy(child_brush_indices, category->brush_ids, category->count * sizeof(int));
+    child_brush_count = category->count;
+    child_brush_use_icons = category->use_icons;
+    child_brush_variable_size = category->variable_size;
   }
   else {
     /* Default to category 1 if no match */
-    child_brush_category = 1;
-    int brushes[] = {0, 1, 2, 3, 4};
-    memcpy(child_brush_indices, brushes, sizeof(brushes));
-    child_brush_count = 5;
+    category = &brush_categories[0];  /* First category */
+    child_brush_category = category->category_id;
+    memcpy(child_brush_indices, category->brush_ids, category->count * sizeof(int));
+    child_brush_count = category->count;
+    child_brush_use_icons = category->use_icons;
+    child_brush_variable_size = category->variable_size;
+    
+    SDL_Log("Warning: Brush %d not in any category, defaulting to category 1", expert_mode_brush);
   }
   
   /* Set cur_brush to first brush in category */
@@ -12450,9 +12478,9 @@ static void draw_brushes(void)
     most -= 2;
   }
 
-  /* Do we need scrollbars? */
+  /* Do we need scrollbars? (Use sorted_brush_count instead of num_brushes) */
 
-  if (num_brushes > most + TOOLOFFSET)
+  if (sorted_brush_count > most + TOOLOFFSET)
   {
     most = most - gd_toolopt.cols;      /* was 12 */
     off_y = img_scroll_up->h;
@@ -12473,7 +12501,7 @@ static void draw_brushes(void)
     dest.x = WINDOW_WIDTH - r_ttoolopt.w;
     dest.y = r_ttoolopt.h + img_scroll_up->h + ((most / gd_toolopt.cols + TOOLOFFSET / gd_toolopt.cols) * button_h);
 
-    if (brush_scroll < num_brushes - most - TOOLOFFSET)
+    if (brush_scroll < sorted_brush_count - most - TOOLOFFSET)
     {
       SDL_BlitSurface(img_scroll_down, NULL, screen, &dest);
     }
@@ -12489,24 +12517,31 @@ static void draw_brushes(void)
   }
 
 
-  /* Draw each of the shown brushes: */
-  SDL_Log("DRAWING BRUSH BUTTONS: child_mode=%d, brush_scroll=%d, max=%d, num_brushes=%d", child_mode, brush_scroll, max, num_brushes);
+  /* Draw each of the shown brushes (sorted by category): */
+  SDL_Log("DRAWING BRUSH BUTTONS: child_mode=%d, brush_scroll=%d, max=%d, sorted_brush_count=%d", 
+          child_mode, brush_scroll, max, sorted_brush_count);
 
-  for (brush = brush_scroll; brush < brush_scroll + max; brush++)
+  for (i = 0; i < max; i++)
   {
-    i = brush - brush_scroll;
-
+    int sorted_index = brush_scroll + i;
+    
+    /* Get the actual brush ID from sorted array */
+    if (sorted_index < sorted_brush_count) {
+      brush = sorted_brushes[sorted_index];
+    } else {
+      brush = -1;  /* No brush at this position */
+    }
 
     dest.x = ((i % 2) * button_w) + (WINDOW_WIDTH - r_ttoolopt.w);
     dest.y = ((i / 2) * button_h) + r_ttoolopt.h + off_y;
 
-    SDL_Log("  Drawing brush button #%d at (%d,%d)", brush, dest.x, dest.y);
+    SDL_Log("  Drawing brush button #%d (sorted_idx=%d) at (%d,%d)", brush, sorted_index, dest.x, dest.y);
 
-    if (brush == cur_brush)
+    if (brush >= 0 && brush == cur_brush)
     {
       SDL_BlitSurface(img_btn_down, NULL, screen, &dest);
     }
-    else if (brush < num_brushes)
+    else if (brush >= 0 && brush < num_brushes)
     {
       SDL_BlitSurface(img_btn_up, NULL, screen, &dest);
     }
@@ -12515,7 +12550,7 @@ static void draw_brushes(void)
       SDL_BlitSurface(img_btn_off, NULL, screen, &dest);
     }
 
-    if (brush < num_brushes)
+    if (brush >= 0 && brush < num_brushes)
     {
       int ui_btn_x, ui_btn_y;
 
@@ -32731,6 +32766,9 @@ static void setup(void)
   }
 
   free(homedirdir);
+
+  /* Initialize sorted brushes array based on categories */
+  init_sorted_brushes();
 
 
   /* Load system fonts: */
