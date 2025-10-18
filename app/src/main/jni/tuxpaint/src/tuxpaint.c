@@ -4561,10 +4561,19 @@ static void mainloop(void)
               else if (cur_tool == TOOL_MAGIC)
               {
                 /* Slide colorbar in only if magic tool uses colors */
-                if (magics[magic_group][cur_magic[magic_group]].colors)
+                if (magics[magic_group][cur_magic[magic_group]].colors){
                   slide_colorbar_in();
-                else
+#ifdef __ANDROID__
+                  __android_log_print(ANDROID_LOG_DEBUG, "TuxPaint", 
+                                     "MAGIC tool uses colors");
+#endif
+                } else {
                   slide_colorbar_out();
+#ifdef __ANDROID__
+                  __android_log_print(ANDROID_LOG_DEBUG, "TuxPaint", 
+                                     "MAGIC tool: no colors");
+#endif
+                }
                 
                 keybd_flag = 0;
                 cur_thing = cur_magic[magic_group];
@@ -24936,8 +24945,8 @@ magic_handle[num_plugin_files] = SDL_LoadObject(fname);
                   num_plugin_files++;
                   
 #ifdef __ANDROID__
-                  /* Only load first plugin for faster startup during development */
-                  if (num_plugin_files >= 1) {
+                  /* Only load some plugins for faster startup during development */
+                  if (num_plugin_files >= 10) {
                     __android_log_print(ANDROID_LOG_INFO, "TuxPaint", 
                                        "Developer Fast mode: Loaded first magic plugin only, skipping rest");
                     closedir(d);
