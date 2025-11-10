@@ -1625,7 +1625,7 @@ static void slide_colorbar_out(void)
       ui_offset_y_tux = ui_offset_y_colors;
     }
     
-    /* Redraw canvas first (it's now visible) */
+    /* Refresh the visible canvas section now in view */
     update_canvas(0, 0, WINDOW_WIDTH - r_ttoolopt.w, WINDOW_HEIGHT);
     
     /* Clear area between toolbar and colorbar (freed by slide-out) */
@@ -4389,6 +4389,7 @@ static void mainloop(void)
                   }
                 }
               }
+              /* Refresh the main canvas after switching tools */
               update_canvas(0, 0, WINDOW_WIDTH - r_ttoolopt.w, (button_h * buttons_tall) + r_ttools.h);
 
               old_tool = cur_tool;
@@ -5547,6 +5548,7 @@ static void mainloop(void)
                     {
                       /* Already in label select mode; turn it off */
                       cur_label = LABEL_LABEL;
+                      /* Redraw label controls after exiting select mode */
                       update_canvas(0, 0, WINDOW_WIDTH - r_ttoolopt.w, (button_h * buttons_tall) + r_ttoolopt.h);
                       if (onscreen_keyboard)
                       {
@@ -6017,6 +6019,7 @@ static void mainloop(void)
               tool_avail[TOOL_REDO] = 0;      /* Don't let them 'redo' to get preview back */
               draw_toolbar();
               update_screen_rect(&r_tools);
+              /* Clear any lingering shape previews from the canvas */
               update_canvas(0, 0, canvas->w, canvas->h);
             }
 
@@ -6389,6 +6392,7 @@ static void mainloop(void)
 
                 draw_tux_text(TUX_GREAT, magics[grp][cur].tip[magic_modeint(magics[grp][cur].mode)], 1);
 
+                /* Repaint the region affected by the magic click */
                 update_canvas(update_rect.x, update_rect.y,
                               update_rect.x + update_rect.w, update_rect.y + update_rect.h);
               }
@@ -6476,6 +6480,7 @@ static void mainloop(void)
                   do_flood_fill(screen, texture, renderer, last, canvas,
                                 old_x, old_y, draw_color, canv_color, &x1, &y1, &x2, &y2, sim_flood_touched);
 
+                  /* Update the area painted by the fill brush so the new color shows immediately */
                   update_canvas(x1, y1, x2, y2);
                 }
                 else
@@ -7445,7 +7450,8 @@ static void mainloop(void)
 
               draw_tux_text(TUX_GREAT, magics[grp][cur].tip[magic_modeint(magics[grp][cur].mode)], 1);
 
-              update_canvas(update_rect.x, update_rect.y, update_rect.x + update_rect.w, update_rect.y + update_rect.h);
+            /* Finalize the release by redrawing the magic tool footprint */
+            update_canvas(update_rect.x, update_rect.y, update_rect.x + update_rect.w, update_rect.y + update_rect.h);
             }
           }
           else if (onscreen_keyboard &&
@@ -8128,6 +8134,7 @@ static void mainloop(void)
                                  sim_flood_x2, sim_flood_y2, fill_x, fill_y,
                                  new_x, new_y, draw_color, sim_flood_touched);
 
+            /* Redraw the gradient preview area to reflect the latest drag position */
             update_canvas(sim_flood_x1, sim_flood_y1, sim_flood_x2, sim_flood_y2);
 
             if (new_y != fill_y)
@@ -8816,6 +8823,7 @@ static void brush_draw(int x1, int y1, int x2, int y2, int update)
   if (update)
   {
     sz = max(w, h);
+    /* Refresh the full brush stroke bounds */
     update_canvas(orig_x1 - sz, orig_y1 - sz, orig_x2 + sz, orig_y2 + sz);
   }
 }
@@ -9496,6 +9504,7 @@ static void stamp_draw(int x, int y, int stamp_angle_rotation)
   SDL_BlitSurface(tmp_surf, NULL, canvas, &dest);       /* FIXME: Conditional jump or move depends on uninitialised value(s) */
 
 
+  /* Display the newly stamped image region */
   update_canvas(x - (tmp_surf->w + 1) / 2,
                 y - (tmp_surf->h + 1) / 2, x + (tmp_surf->w + 1) / 2, y + (tmp_surf->h + 1) / 2);
 
